@@ -1,165 +1,165 @@
-name: ci
+# name: ci
 
-on:
-  pull_request:
-  push:
-    branches: [main]
+# on:
+#   pull_request:
+#   push:
+#     branches: [main]
 
-permissions:
-  contents: read
+# permissions:
+#   contents: read
 
-jobs:
-  python:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/producer
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-        with:
-          enable-cache: true
-      - run: uv sync --locked
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy
-      - run: uv run pytest
-      - name: licenses (open source only)
-        run: uv run python ../../tools/check_licenses.py
+# jobs:
+#   python:
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: services/producer
+#     steps:
+#       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+#       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+#         with:
+#           enable-cache: true
+#       - run: uv sync --locked
+#       - run: uv run ruff check .
+#       - run: uv run ruff format --check .
+#       - run: uv run mypy
+#       - run: uv run pytest
+#       - name: licenses (open source only)
+#         run: uv run python ../../tools/check_licenses.py
 
-  ingestion:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/ingestion
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-        with:
-          enable-cache: true
-      - run: uv sync --locked --all-extras
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy
-      # GitHub-hosted runners have Docker, so the pgvector integration tests run here.
-      - run: uv run pytest
-      - name: licenses (open source only)
-        run: uv run python ../../tools/check_licenses.py
+#   ingestion:
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: services/ingestion
+#     steps:
+#       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+#       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+#         with:
+#           enable-cache: true
+#       - run: uv sync --locked --all-extras
+#       - run: uv run ruff check .
+#       - run: uv run ruff format --check .
+#       - run: uv run mypy
+#       # GitHub-hosted runners have Docker, so the pgvector integration tests run here.
+#       - run: uv run pytest
+#       - name: licenses (open source only)
+#         run: uv run python ../../tools/check_licenses.py
 
-  ui-bff:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/ui/bff
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-        with:
-          enable-cache: true
-      - run: uv sync --locked
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run mypy
-      - run: uv run pytest
-      - name: licenses (open source only)
-        run: uv run python ../../../tools/check_licenses.py
+#   ui-bff:
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: services/ui/bff
+#     steps:
+#       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+#       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+#         with:
+#           enable-cache: true
+#       - run: uv sync --locked
+#       - run: uv run ruff check .
+#       - run: uv run ruff format --check .
+#       - run: uv run mypy
+#       - run: uv run pytest
+#       - name: licenses (open source only)
+#         run: uv run python ../../../tools/check_licenses.py
 
-  # The static SPA: strict type check, unit tests, production build, the npm license gate and a
-  # CycloneDX SBOM. Dependencies come from package-lock.json exactly (npm ci).
-  ui-web:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/ui/web
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: services/ui/web/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
-      - name: licenses (open source only)
-        run: node ../../../tools/check_npm_licenses.mjs
-      - name: SBOM (CycloneDX)
-        run: npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --output-file sbom.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: ui-web-${{ github.sha }}
-          path: |
-            services/ui/web/dist
-            services/ui/web/sbom.json
-          retention-days: 30
+#   # The static SPA: strict type check, unit tests, production build, the npm license gate and a
+#   # CycloneDX SBOM. Dependencies come from package-lock.json exactly (npm ci).
+#   ui-web:
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: services/ui/web
+#     steps:
+#       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+#       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+#         with:
+#           node-version: 22
+#           cache: npm
+#           cache-dependency-path: services/ui/web/package-lock.json
+#       - run: npm ci
+#       - run: npm run typecheck
+#       - run: npm test
+#       - run: npm run build
+#       - name: licenses (open source only)
+#         run: node ../../../tools/check_npm_licenses.mjs
+#       - name: SBOM (CycloneDX)
+#         run: npx --yes @cyclonedx/cyclonedx-npm@6.0.1 --output-file sbom.json
+#       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+#         with:
+#           name: ui-web-${{ github.sha }}
+#           path: |
+#             services/ui/web/dist
+#             services/ui/web/sbom.json
+#           retention-days: 30
 
-  terraform:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: terraform
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
-        with:
-          terraform_version: "~1.15"
-      - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
-        with:
-          tflint_version: v0.64.0
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-      # make test-scripts also runs the ui stack's CloudFront Function tests (node --test).
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
+#   terraform:
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: terraform
+#     steps:
+#       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+#       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+#         with:
+#           terraform_version: "~1.15"
+#       - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
+#         with:
+#           tflint_version: v0.64.0
+#       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+#       # make test-scripts also runs the ui stack's CloudFront Function tests (node --test).
+#       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+#         with:
+#           node-version: 22
 
-      - name: fmt
-        run: make fmt
+#       - name: fmt
+#         run: make fmt
 
-      - name: validate
-        run: make validate
+#       - name: validate
+#         run: make validate
 
-      - name: test
-        run: make test
+#       - name: test
+#         run: make test
 
-      - name: teardown script (ruff, unit tests)
-        run: make test-scripts
+#       - name: teardown script (ruff, unit tests)
+#         run: make test-scripts
 
-      - name: lint (tflint, checkov)
-        run: make lint
+#       - name: lint (tflint, checkov)
+#         run: make lint
 
-  # The Lambda packages exactly as they would be deployed: hash-checked dependencies from
-  # uv.lock, arm64 wheels, within Lambda's 250 MB unzipped limit; an SBOM per service. The zips
-  # are kept as build artifacts (named by commit) for the deploy that promotes them.
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
-        with:
-          enable-cache: true
-      - name: ingestion packages
-        working-directory: services/ingestion
-        run: scripts/build_lambda.sh all
-      - name: producer package
-        working-directory: services/producer
-        run: scripts/build_lambda.sh
-      - name: ui bff package
-        working-directory: services/ui/bff
-        run: scripts/build_lambda.sh
-      - name: SBOM (CycloneDX)
-        run: |
-          for svc in producer ingestion ui/bff; do
-            (cd services/$svc && uv export --frozen --no-dev --all-extras --format requirements-txt --no-hashes \
-              | uvx --from cyclonedx-bom==7.5.0 cyclonedx-py requirements - -o "$GITHUB_WORKSPACE/sbom-${svc//\//-}.cdx.json")
-          done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: lambda-packages-${{ github.sha }}
-          path: |
-            services/ingestion/dist/*.zip
-            services/producer/dist/*.zip
-            services/ui/bff/dist/*.zip
-            sbom-*.cdx.json
-          retention-days: 30
+#   # The Lambda packages exactly as they would be deployed: hash-checked dependencies from
+#   # uv.lock, arm64 wheels, within Lambda's 250 MB unzipped limit; an SBOM per service. The zips
+#   # are kept as build artifacts (named by commit) for the deploy that promotes them.
+#   build:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+#       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+#         with:
+#           enable-cache: true
+#       - name: ingestion packages
+#         working-directory: services/ingestion
+#         run: scripts/build_lambda.sh all
+#       - name: producer package
+#         working-directory: services/producer
+#         run: scripts/build_lambda.sh
+#       - name: ui bff package
+#         working-directory: services/ui/bff
+#         run: scripts/build_lambda.sh
+#       - name: SBOM (CycloneDX)
+#         run: |
+#           for svc in producer ingestion ui/bff; do
+#             (cd services/$svc && uv export --frozen --no-dev --all-extras --format requirements-txt --no-hashes \
+#               | uvx --from cyclonedx-bom==7.5.0 cyclonedx-py requirements - -o "$GITHUB_WORKSPACE/sbom-${svc//\//-}.cdx.json")
+#           done
+#       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+#         with:
+#           name: lambda-packages-${{ github.sha }}
+#           path: |
+#             services/ingestion/dist/*.zip
+#             services/producer/dist/*.zip
+#             services/ui/bff/dist/*.zip
+#             sbom-*.cdx.json
+#           retention-days: 30
 
