@@ -1,0 +1,23 @@
+meta {
+  name: Get process
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{producerUrl}}/v1/processes/{{processId}}
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("200 with counts", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body).to.have.property("registered_count");
+    expect(res.body).to.have.property("settled");
+  });
+}
+
+docs {
+  `settled`: CLOSED, every upload has an outcome (`pending_uploads` 0: registered, rejected, superseded or expired) and at least `expected_count` tickets were issued.
+}

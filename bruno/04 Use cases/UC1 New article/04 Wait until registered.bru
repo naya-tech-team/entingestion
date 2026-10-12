@@ -1,0 +1,34 @@
+meta {
+  name: UC1 Wait until registered
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{producerUrl}}/v1/uploads/{{uploadId}}
+  body: none
+  auth: inherit
+}
+
+script:post-response {
+  // Polls when run from the collection runner or bru run: repeats this request every
+  // 5 s until the registrar has finished, up to 24 times.
+  const key = "poll_" + req.getName().replace(/[^A-Za-z0-9_.-]/g, "_");
+  const count = (bru.getVar(key) || 0) + 1;
+  const done = res.status === 200 && ["REGISTERED", "REJECTED", "SUPERSEDED"].includes(res.body.status);
+  if (!done && count < 24 && bru.runner) {
+    bru.setVar(key, count);
+    bru.setVar("pollPending", true); // the tests wait for the final poll
+    await bru.sleep(5000);
+    bru.runner.setNextRequest(req.getName());
+  } else {
+    bru.setVar(key, 0);
+    bru.setVar("pollPending", false);
+  }
+}
+
+tests {
+  if (!bru.getVar("pollPending")) {
+    test("REGISTERED", () => expect(res.body.status).to.equal("REGISTERED"));
+  }
+}

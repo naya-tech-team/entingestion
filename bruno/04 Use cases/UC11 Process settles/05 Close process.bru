@@ -1,0 +1,22 @@
+meta {
+  name: UC11 Close process
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{producerUrl}}/v1/processes/{{processId}}/close
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {}
+}
+
+tests {
+  test("closed and settled", () => {
+    expect(res.body.status).to.equal("CLOSED");
+    expect(res.body.settled).to.equal(true);
+  });
+}

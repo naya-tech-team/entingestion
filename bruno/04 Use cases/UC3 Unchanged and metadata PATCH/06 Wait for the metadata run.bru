@@ -1,0 +1,38 @@
+meta {
+  name: UC3 Wait for the metadata run
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{ingestionUrl}}/v1/articles/{{articleId}}/status
+  body: none
+  auth: inherit
+}
+
+script:post-response {
+  // Polls when run from the collection runner or bru run: repeats this request every
+  // 5 s until a second run has finished, up to 48 times.
+  const key = "poll_" + req.getName().replace(/[^A-Za-z0-9_.-]/g, "_");
+  const count = (bru.getVar(key) || 0) + 1;
+  const done = res.status === 200 && (res.body?.runs?.length || 0) >= 2 && res.body.runs[0].outcome;
+  if (!done && count < 48 && bru.runner) {
+    bru.setVar(key, count);
+    bru.setVar("pollPending", true); // the tests wait for the final poll
+    await bru.sleep(5000);
+    bru.runner.setNextRequest(req.getName());
+  } else {
+    bru.setVar(key, 0);
+    bru.setVar("pollPending", false);
+  }
+}
+
+tests {
+  if (!bru.getVar("pollPending")) {
+    test("second run updated metadata only", () => {
+      expect(["SKIPPED_UNCHANGED", "METADATA_UPDATED"]).to.include(res.body.runs[0].outcome);
+      expect(res.body?.latest?.status).to.equal("INDEXED");
+      expect(res.body.latest.doc_version).to.equal(1);
+    });
+  }
+}

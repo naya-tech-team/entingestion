@@ -1,0 +1,86 @@
+[project]
+name = "ingest"
+version = "0.1.0"
+description = "Ingestion pipeline: producer articles -> validated chunks in Aurora PostgreSQL + pgvector."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aws-lambda-powertools[tracer]>=3.0,<4",
+    "boto3>=1.35",
+    "botocore>=1.35",
+    "pydantic>=2.9,<3",
+    "python-ulid>=3.0,<4",
+]
+
+[project.optional-dependencies]
+# Lambda package groups (scripts/build_lambda.sh <group>).
+# Each group must stay under Lambda's 250 MB unzipped limit (checked by build_lambda.sh).
+# core: dispatcher, claim, fetch, embed, validate, index, finalize, mark_failed, control,
+#       reconciler, migrate, tables. pyarrow (~150 MB) is here because embed/validate/index use Parquet.
+core = [
+    "pgvector>=0.3,<1",
+    "psycopg[binary]>=3.2,<4",
+    "pyarrow>=17",
+]
+# docs: extract, normalize, chunk (document parsing and tokenizing; no pyarrow)
+docs = [
+    "ftfy>=6.2,<7",
+    "mammoth>=1.8,<2",
+    "pdfplumber>=0.11,<1",  # MIT (pdfminer.six MIT, pypdfium2 BSD/Apache); not PyMuPDF (AGPL)
+    "tiktoken>=0.8,<1",
+    "trafilatura>=2.0,<3",
+]
+
+[dependency-groups]
+dev = [
+    "boto3-stubs[bedrock-runtime,dynamodb,events,rds,s3,secretsmanager,sns,sqs,stepfunctions,textract,lambda]>=1.35",
+    "moto[dynamodb,s3,sqs,stepfunctions]>=5.0",
+    "mypy>=1.13",
+    "pypdf>=5",  # BSD: builds (and encrypts) PDF fixtures
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "testcontainers[postgres]>=4.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ingest"]
+
+[tool.uv]
+# Lambda groups are installed from the lock with their extras; dev installs everything.
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PL", "PT"]
+ignore = ["PLR0913"]
+
+[tool.ruff.lint.per-file-ignores]
+# Fixtures import the app after moto and env vars are in place.
+"tests/**" = ["S101", "PLR2004", "PLC0415"]
+# Operator scripts: print, run CLIs, seeded (non-crypto) randomness, long HTML templates.
+"scripts/**" = ["T201", "S311", "S603", "S607", "PLR2004", "E501"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = ["src"]
+packages = ["ingest"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["moto.*", "testcontainers.*", "pgvector.*", "trafilatura.*", "mammoth.*", "pdfplumber.*", "pdfminer.*", "pyarrow.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+markers = ["integration: needs Docker (testcontainers); skipped when Docker isn't available"]

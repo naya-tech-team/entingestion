@@ -1,0 +1,63 @@
+meta {
+  name: UC2 Upload v1
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{producerUrl}}/v1/processes/{{processId}}/uploads
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "filename": "article.txt",
+    "content_type": "text/plain",
+    "size_bytes": {{docSize}},
+    "sha256": "{{docSha256}}",
+    "external_id": "{{externalId}}",
+    "title": "Bruno walkthrough {{runTag}}",
+    "metadata": {"origin": "bruno"}
+  }
+}
+
+script:pre-request {
+  const CryptoJS = require("crypto-js");
+  const tag = bru.getVar("runTag") || `${Date.now()}`;
+  const version = 1;
+  // About 14 paragraphs of ~110 words: several chunks of 512 tokens, so version 2 (one more
+  // paragraph at the end) leaves the first chunks unchanged and reuses their cached embeddings.
+  const topics = ["chunking", "embeddings", "vector search", "staging", "replays", "leases", "validation",
+    "indexing", "evaluation", "reconciliation", "monitoring", "security", "cost", "operations"];
+  const paragraphs = [`Bruno walkthrough document ${tag}.`];
+  topics.forEach((topic, i) => {
+    const sentences = [];
+    for (let j = 1; j <= 6; j++) {
+      sentences.push(`Section ${i + 1} on ${topic}, point ${j}: the pipeline handles ${topic} deterministically so that ` +
+        `every run of the same article version produces the same staged output and the same chunk identifiers.`);
+    }
+    paragraphs.push(sentences.join(" "));
+  });
+  if (version >= 2) {
+    paragraphs.push("Version two adds this closing paragraph. Unchanged chunks reuse cached embeddings; only new text goes to Bedrock.");
+  }
+  const text = paragraphs.join("\n\n") + "\n";
+  bru.setVar("docText", text);
+  bru.setVar("docSha256", CryptoJS.SHA256(text).toString(CryptoJS.enc.Hex));
+  bru.setVar("docSize", CryptoJS.enc.Utf8.parse(text).sigBytes);
+  bru.setVar("externalId", `bruno/${tag}/article.txt`);
+}
+
+script:post-response {
+  if (res.status === 201) {
+    bru.setVar("uploadId", res.body.upload_id);
+    bru.setVar("articleId", res.body.article_id);
+    bru.setVar("uploadUrl", res.body.url);
+    bru.setVar("uploadHeaders", JSON.stringify(res.body.headers));
+  }
+}
+
+tests {
+  test("201", () => expect(res.status).to.equal(201));
+}

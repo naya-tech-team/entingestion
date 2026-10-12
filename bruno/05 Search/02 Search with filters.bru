@@ -1,0 +1,28 @@
+meta {
+  name: Search with filters
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{ingestionUrl}}/v1/search
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "tenant_id": "{{tenantId}}",
+    "query": "vector index lease",
+    "k": 5,
+    "filters": {"source": "{{source}}", "published_after": "2020-01-01"}
+  }
+}
+
+tests {
+  test("200", () => expect(res.status).to.equal(200));
+}
+
+docs {
+  Filters: `source`, `published_after` (YYYY-MM-DD), `process_id`.
+}

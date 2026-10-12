@@ -1,0 +1,947 @@
+{
+  "Comment": "Ingest one article version (brief §4). Steps follow the §6.3 write protocol. A run that outlives TimeoutSeconds times out (alarm runs-timing-out); its lease expires and the reconciler resumes the article.",
+  "StartAt": "Claim",
+  "TimeoutSeconds": ${execution_timeout},
+  "States": {
+    "Claim": {
+      "Type": "Task",
+      "Comment": "Step 1: Claim. Decides RUN / SKIP / STALE / DELETE / DONE / METADATA; recorded on RUN#.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${claim_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx",
+          "execution_arn.$": "$$.Execution.Id"
+        }
+      },
+      "ResultSelector": {
+        "ctx.$": "$.Payload"
+      },
+      "ResultPath": "$",
+      "TimeoutSeconds": ${timeout_claim},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "Route"
+    },
+    "Route": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.ctx.action",
+          "StringEquals": "DELETE",
+          "Next": "Index"
+        },
+        {
+          "Variable": "$.ctx.action",
+          "StringEquals": "METADATA",
+          "Next": "Index"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ctx.action",
+              "StringEquals": "RUN"
+            },
+            {
+              "Variable": "$.ctx.start_at",
+              "StringEquals": "FETCH"
+            }
+          ],
+          "Next": "Fetch"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ctx.action",
+              "StringEquals": "RUN"
+            },
+            {
+              "Variable": "$.ctx.start_at",
+              "StringEquals": "EXTRACT"
+            }
+          ],
+          "Next": "Extract"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ctx.action",
+              "StringEquals": "RUN"
+            },
+            {
+              "Variable": "$.ctx.start_at",
+              "StringEquals": "NORMALIZE"
+            }
+          ],
+          "Next": "Normalize"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ctx.action",
+              "StringEquals": "RUN"
+            },
+            {
+              "Variable": "$.ctx.start_at",
+              "StringEquals": "CHUNK"
+            }
+          ],
+          "Next": "Chunk"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ctx.action",
+              "StringEquals": "RUN"
+            },
+            {
+              "Variable": "$.ctx.start_at",
+              "StringEquals": "EMBED"
+            }
+          ],
+          "Next": "Embed"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ctx.action",
+              "StringEquals": "RUN"
+            },
+            {
+              "Variable": "$.ctx.start_at",
+              "StringEquals": "VALIDATE"
+            }
+          ],
+          "Next": "Validate"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ctx.action",
+              "StringEquals": "RUN"
+            },
+            {
+              "Variable": "$.ctx.start_at",
+              "StringEquals": "INDEX"
+            }
+          ],
+          "Next": "Index"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.ctx.action",
+              "StringEquals": "RUN"
+            },
+            {
+              "Variable": "$.ctx.start_at",
+              "StringEquals": "FINALIZE"
+            }
+          ],
+          "Next": "Finalize"
+        }
+      ],
+      "Default": "Done"
+    },
+    "Fetch": {
+      "Type": "Task",
+      "Comment": "Step 2: Fetch",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${fetch_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": "$.fetched",
+      "TimeoutSeconds": ${timeout_fetch},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "AfterFetch",
+      "ResultSelector": {
+        "route.$": "$.Payload.route"
+      }
+    },
+    "AfterFetch": {
+      "Type": "Choice",
+      "Comment": "A PDF too big for Lambda goes straight to OCR.",
+      "Choices": [
+        {
+          "Variable": "$.fetched.route",
+          "StringEquals": "OCR",
+          "Next": "OcrStart"
+        }
+      ],
+      "Default": "Extract"
+    },
+    "Extract": {
+      "Type": "Task",
+      "Comment": "Step 3: Extract",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${extract_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": "$.extracted",
+      "TimeoutSeconds": ${timeout_extract},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "AfterExtract",
+      "ResultSelector": {
+        "route.$": "$.Payload.route"
+      }
+    },
+    "AfterExtract": {
+      "Type": "Choice",
+      "Comment": "A scanned PDF (no text layer) goes to OCR.",
+      "Choices": [
+        {
+          "Variable": "$.extracted.route",
+          "StringEquals": "OCR",
+          "Next": "OcrStart"
+        }
+      ],
+      "Default": "Normalize"
+    },
+    "OcrStart": {
+      "Type": "Task",
+      "Comment": "Step 3 (OCR): start Textract text detection; its result lands in staging.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ocr_start_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": "$.ocr",
+      "TimeoutSeconds": ${timeout_ocr_start},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "OcrWait",
+      "ResultSelector": {
+        "job_id.$": "$.Payload.job_id",
+        "polls": 0
+      }
+    },
+    "OcrWait": {
+      "Type": "Wait",
+      "Seconds": ${ocr_poll_seconds},
+      "Next": "OcrPoll"
+    },
+    "OcrPoll": {
+      "Type": "Task",
+      "Comment": "Step 3 (OCR): job status; keeps the lease while Textract works. Fails E_TIMEOUT (retryable) after OCR_MAX_POLLS checks.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ocr_poll_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx",
+          "job_id.$": "$.ocr.job_id",
+          "polls.$": "$.ocr.polls"
+        }
+      },
+      "ResultPath": "$.ocr",
+      "TimeoutSeconds": ${timeout_ocr_poll},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "OcrDone",
+      "ResultSelector": {
+        "job_id.$": "$.Payload.job_id",
+        "status.$": "$.Payload.status",
+        "polls.$": "$.Payload.polls"
+      }
+    },
+    "OcrDone": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.ocr.status",
+          "StringEquals": "IN_PROGRESS",
+          "Next": "OcrWait"
+        }
+      ],
+      "Default": "OcrCollect"
+    },
+    "OcrCollect": {
+      "Type": "Task",
+      "Comment": "Step 3 (OCR): staged Textract result -> extracted/content.json; ends Extract.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${ocr_collect_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx",
+          "job_id.$": "$.ocr.job_id"
+        }
+      },
+      "ResultPath": null,
+      "TimeoutSeconds": ${timeout_ocr_collect},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "Normalize"
+    },
+    "Normalize": {
+      "Type": "Task",
+      "Comment": "Step 4: Normalize",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${normalize_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": null,
+      "TimeoutSeconds": ${timeout_normalize},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "Chunk"
+    },
+    "Chunk": {
+      "Type": "Task",
+      "Comment": "Step 5: Chunk",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${chunk_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": null,
+      "TimeoutSeconds": ${timeout_chunk},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "Embed"
+    },
+    "Embed": {
+      "Type": "Task",
+      "Comment": "Step 6: Embed",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${embed_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": null,
+      "TimeoutSeconds": ${timeout_embed},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "Validate"
+    },
+    "Validate": {
+      "Type": "Task",
+      "Comment": "Step 7: Validate",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${validate_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": null,
+      "TimeoutSeconds": ${timeout_validate},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "Index"
+    },
+    "Index": {
+      "Type": "Task",
+      "Comment": "Step 8: Index",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${index_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": null,
+      "TimeoutSeconds": ${timeout_index},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "AfterIndex"
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Comment": "Step 9: Finalize",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${finalize_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx"
+        }
+      },
+      "ResultPath": null,
+      "TimeoutSeconds": ${timeout_finalize},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "IngestStale"
+          ],
+          "ResultPath": null,
+          "Next": "Stale"
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "MarkFailed"
+        }
+      ],
+      "Next": "Done"
+    },
+    "AfterIndex": {
+      "Type": "Choice",
+      "Comment": "A delete run, and a metadata-only run, end at Index (it already finished the run).",
+      "Choices": [
+        {
+          "Variable": "$.ctx.mode",
+          "StringEquals": "DELETE",
+          "Next": "Done"
+        },
+        {
+          "Variable": "$.ctx.mode",
+          "StringEquals": "METADATA",
+          "Next": "Done"
+        }
+      ],
+      "Default": "Finalize"
+    },
+    "MarkFailed": {
+      "Type": "Task",
+      "Comment": "Skip, retryable or permanent failure (brief §6.3 step 5).",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${mark_failed_arn}",
+        "Payload": {
+          "ctx.$": "$.ctx",
+          "error.$": "$.error"
+        }
+      },
+      "ResultSelector": {
+        "outcome.$": "$.Payload.outcome"
+      },
+      "ResultPath": "$.marked",
+      "TimeoutSeconds": ${timeout_mark_failed},
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "IngestThrottled",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": ${throttle_max_attempts},
+          "MaxDelaySeconds": 120,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": [
+            "IngestTransient",
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException"
+          ],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2,
+          "MaxAttempts": 3,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Outcome"
+    },
+    "Outcome": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.marked.outcome",
+          "StringEquals": "SKIPPED",
+          "Next": "Done"
+        },
+        {
+          "Variable": "$.marked.outcome",
+          "StringEquals": "STALE",
+          "Next": "Stale"
+        },
+        {
+          "Variable": "$.marked.outcome",
+          "StringEquals": "INDEXED",
+          "Next": "Done"
+        },
+        {
+          "Variable": "$.marked.outcome",
+          "StringEquals": "DELETED",
+          "Next": "Done"
+        }
+      ],
+      "Default": "Failed"
+    },
+    "Done": {
+      "Type": "Succeed"
+    },
+    "Stale": {
+      "Type": "Succeed",
+      "Comment": "Another run owns the article; this one ends quietly."
+    },
+    "Failed": {
+      "Type": "Fail",
+      "Error": "IngestFailed",
+      "Cause": "The run failed; see LATEST and the RUN# items in ingestion_status."
+    }
+  }
+}

@@ -1,0 +1,22 @@
+meta {
+  name: Vector tables
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{ingestionUrl}}/v1/tables
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("live table named", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.active_table).to.be.a("string");
+  });
+}
+
+docs {
+  Which table `chunks_active` serves, the registry (`live`, `writes`: the tables live runs write), whether they agree, and rows / active rows / articles per table.
+}

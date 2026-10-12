@@ -1,0 +1,22 @@
+meta {
+  name: Process articles
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{ingestionUrl}}/v1/processes/{{processId}}/articles
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("200 with items (empty before ingestion has seen the process)", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.items).to.be.an("array");
+  });
+}
+
+docs {
+  Each article's ingestion status (status, stage, doc_version, chunk_count, error_code, indexed_at), at most 1000, sorted by article_id.
+}

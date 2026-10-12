@@ -1,0 +1,35 @@
+meta {
+  name: Switch live table
+  type: http
+  seq: 9
+}
+
+post {
+  url: {{ingestionUrl}}/v1/tables/active
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "table": "chunks_titan2_512"
+  }
+}
+
+script:pre-request {
+  // Starts real work. Folder and collection runs skip it unless the environment sets
+  // allowOperations: true; sending it on its own always runs it.
+  if (bru.runner && bru.getEnvVar("allowOperations") !== "true") {
+    bru.runner.skipRequest();
+  }
+}
+
+tests {
+  test("200", () => {
+    expect(res.status).to.equal(200);
+  });
+}
+
+docs {
+  Points `chunks_active` at the table. Refused (409) unless live runs write it, every indexed article is in it, and its newest evaluation (within 7 days) is no worse than the live table's; `force: true` overrides. Run again with the old table to roll back.
+}

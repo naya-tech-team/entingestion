@@ -1,0 +1,21 @@
+meta {
+  name: UC3 Patch metadata
+  type: http
+  seq: 5
+}
+
+patch {
+  url: {{producerUrl}}/v1/articles/{{articleId}}
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "metadata": {"reviewed": "true"}
+  }
+}
+
+tests {
+  test("200", () => expect(res.status).to.equal(200));
+}

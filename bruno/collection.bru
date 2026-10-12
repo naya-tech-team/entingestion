@@ -1,0 +1,34 @@
+auth {
+  mode: awsv4
+}
+
+auth:awsv4 {
+  accessKeyId: {{process.env.AWS_ACCESS_KEY_ID}}
+  secretAccessKey: {{process.env.AWS_SECRET_ACCESS_KEY}}
+  sessionToken: {{process.env.AWS_SESSION_TOKEN}}
+  service: execute-api
+  region: {{awsRegion}}
+  profileName: {{awsProfile}}
+}
+
+docs {
+  # entingestion APIs
+
+  Both APIs use IAM auth (SigV4, service `execute-api`). Every request inherits the collection's
+  AWS Sig v4 auth, except the presigned S3 upload, which is signed by its URL.
+
+  - **Producer API** (`{{producerUrl}}`): processes, upload tickets, articles. Policy: producer
+    output `invoke_policy_arn`.
+  - **Ingestion control API** (`{{ingestionUrl}}`): status, re-runs, redrive, reindex, vector
+    tables, search. Policies: ingestion outputs `control_api_reader_policy_arn` (GET),
+    `control_api_operator_policy_arn` (everything) and `control_api_search_policy_arn` (search).
+
+  Which sources (and so which tenants) a caller may use is set by the producer's
+  `source_access`: writers create processes and upload, readers read and search.
+
+  Credentials come from the AWS profile in the environment (`awsProfile`), or from
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` in the shell.
+
+  The **Use cases** folders run end to end with the collection runner or `bru run`; they poll
+  until the pipeline reaches the expected state. See bruno/README.md and docs/USE_CASES.md.
+}

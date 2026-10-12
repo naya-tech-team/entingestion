@@ -1,0 +1,13 @@
+meta {
+  name: UC11 Process settles
+  seq: 5
+}
+
+auth {
+  mode: inherit
+}
+
+docs {
+  When the producer process settles and every article has an outcome, the ingestion summary turns
+  COMPLETE (or COMPLETE_WITH_ERRORS) and a process.ingested event is emitted.
+}

@@ -1,0 +1,24 @@
+meta {
+  name: List the caller's sources
+  type: http
+  seq: 14
+}
+
+get {
+  url: {{producerUrl}}/v1/sources
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("200, the source is writable", () => {
+    expect(res.status).to.equal(200);
+    const mine = res.body.items.find((i) => i.source === bru.getEnvVar("source"));
+    expect(mine, "the environment's source").to.exist;
+    expect(mine.access).to.equal("write");
+  });
+}
+
+docs {
+  The sources in `source_access` the caller may write (`write`) or only read (`read`), with their tenant, sorted by source. Admins get every source as `write`.
+}

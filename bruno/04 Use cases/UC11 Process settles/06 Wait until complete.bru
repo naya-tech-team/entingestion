@@ -1,0 +1,38 @@
+meta {
+  name: UC11 Wait until complete
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{ingestionUrl}}/v1/processes/{{processId}}/summary
+  body: none
+  auth: inherit
+}
+
+script:post-response {
+  // Polls when run from the collection runner or bru run: repeats this request every
+  // 5 s until the summary is COMPLETE, up to 48 times.
+  const key = "poll_" + req.getName().replace(/[^A-Za-z0-9_.-]/g, "_");
+  const count = (bru.getVar(key) || 0) + 1;
+  const done = res.status === 200 && String(res.body.status).startsWith("COMPLETE");
+  if (!done && count < 48 && bru.runner) {
+    bru.setVar(key, count);
+    bru.setVar("pollPending", true); // the tests wait for the final poll
+    await bru.sleep(5000);
+    bru.runner.setNextRequest(req.getName());
+  } else {
+    bru.setVar(key, 0);
+    bru.setVar("pollPending", false);
+  }
+}
+
+tests {
+  if (!bru.getVar("pollPending")) {
+    test("COMPLETE with one indexed article", () => {
+      expect(res.body.status).to.equal("COMPLETE");
+      expect(res.body.counts.indexed).to.equal(1);
+      expect(res.body.producer.registered_count).to.equal(1);
+    });
+  }
+}

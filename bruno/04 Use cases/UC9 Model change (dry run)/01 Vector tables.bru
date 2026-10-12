@@ -1,0 +1,15 @@
+meta {
+  name: UC9 Vector tables
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{ingestionUrl}}/v1/tables
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("200", () => expect(res.status).to.equal(200));
+}

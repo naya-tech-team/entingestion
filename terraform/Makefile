@@ -1,0 +1,262 @@
+# Deploy a stack to an environment. The code lives once in stacks/<STACK>; each environment
+# supplies only envs/<ENV>/<STACK>.tfvars and envs/<ENV>/<STACK>.s3.tfbackend.
+#
+#   make plan  ENV=dev STACK=producer      # init + plan, saves stacks/<STACK>/<ENV>.tfplan
+#   make apply ENV=dev STACK=producer      # applies exactly that saved plan
+#   make deploy ENV=dev STACK=ingestion    # plan + confirm + apply (+ migrate for ingestion)
+#   make rollback ENV=dev FN=<fn> VERSION=<n>   # point a function's live alias back
+#   make destroy ENV=dev STACK=producer    # disposable envs only (DRY_RUN=1 lists, changes nothing)
+#   make destroy-all ENV=dev               # every stack, dependents first
+#   make check                             # fmt, validate, tests, tflint, checkov (no AWS access)
+#
+# Upload UI (docs/UI.md):
+#   make ui-password ENV=dev               # set the login (prompts; stores only a hash)
+#   make ui-deploy   ENV=dev               # build the web app, upload it, invalidate the cache
+#   make ui-url      ENV=dev               # print the URL
+#   make ui-dev      ENV=dev               # local Vite server proxying /api to that environment
+
+# One shared provider cache: each .terraform dir symlinks the AWS provider (~700 MB) instead of
+# copying it. Module and example dirs have no lock file, so allow the cache for them too.
+export TF_PLUGIN_CACHE_DIR ?= $(HOME)/.terraform.d/plugin-cache
+export TF_PLUGIN_CACHE_MAY_BREAK_DEPENDENCY_LOCK_FILE ?= true
+$(shell mkdir -p $(TF_PLUGIN_CACHE_DIR))
+
+STACK ?= producer
+ENV   ?=
+
+STACK_DIR := stacks/$(STACK)
+VARS      := envs/$(ENV)/$(STACK).tfvars
+BACKEND   := envs/$(ENV)/$(STACK).s3.tfbackend
+PLAN      := $(ENV).tfplan
+
+# Credentials (docs/AWS_ACCESS.md): Terraform runs as the entingestion-<ENV>-deploy role through
+# the AWS profile of that name, which assumes it from your `aws login` session. No access keys.
+#   AWS_EXPORT_CREDS=1  the AWS CLI resolves the profile and hands Terraform plain environment
+#                       credentials (for tools whose SDK can't read an `aws login` session)
+#   ALLOW_AMBIENT=1     use whatever credentials are active, skipping the role check (break-glass)
+AWS_PROFILE ?= entingestion-$(ENV)
+ifndef ALLOW_AMBIENT
+export AWS_PROFILE
+endif
+CREDS := $(if $(AWS_EXPORT_CREDS),eval "$$(aws configure export-credentials --format env)" &&,)
+
+# One .terraform directory per environment, so backend settings can never leak between envs.
+TF := $(CREDS) cd $(STACK_DIR) && TF_DATA_DIR=.terraform/$(ENV) terraform
+
+# Tool versions, pinned so a lint run can't change under us (Renovate proposes upgrades).
+CHECKOV_VERSION ?= 3.3.27
+RUFF_VERSION    ?= 0.17.0
+TFLINT_VERSION  ?= v0.64.0
+
+MODULE_DIRS  := $(wildcard modules/*)
+STACK_DIRS   := $(wildcard stacks/*)
+EXAMPLE_DIRS := $(wildcard modules/*/examples/*)
+
+.PHONY: whoami init plan apply output deploy migrate rollback versions destroy destroy-all check fmt validate test test-scripts lint clean require-env \
+        ui-build ui-deploy ui-password ui-url ui-dev ui-init
+
+# The stack a function belongs to, from its name: <stack>-<env>-<name>.
+FN_STACK = $(firstword $(subst -, ,$(FN)))
+
+require-env:
+	@test -n "$(ENV)" || { echo "ENV is required, e.g. make plan ENV=dev STACK=$(STACK)"; exit 1; }
+	@test -d "$(STACK_DIR)" || { echo "no stack $(STACK_DIR)"; exit 1; }
+	@test -f "$(VARS)" || { echo "missing $(VARS)"; exit 1; }
+	@test -f "$(BACKEND)" || { echo "missing $(BACKEND)"; exit 1; }
+
+# Refuse to run Terraform as anything but this environment's deploy role (unless ALLOW_AMBIENT).
+whoami: require-env
+ifdef ALLOW_AMBIENT
+	@echo "ALLOW_AMBIENT: running as $$(aws sts get-caller-identity --query Arn --output text)"
+else
+	@arn=$$(aws sts get-caller-identity --query Arn --output text 2>/dev/null) || { \
+	  echo "No AWS session for profile $(AWS_PROFILE). Sign in: aws login --profile entingestion (docs/AWS_ACCESS.md)"; exit 1; }; \
+	case "$$arn" in \
+	  *:assumed-role/entingestion-$(ENV)-deploy/*) echo "as $$arn" ;; \
+	  *) echo "Expected role entingestion-$(ENV)-deploy, got $$arn. Check profile $(AWS_PROFILE), or ALLOW_AMBIENT=1 (break-glass)."; exit 1 ;; \
+	esac
+endif
+
+init: require-env whoami
+	$(TF) init -input=false -reconfigure -backend-config=../../$(BACKEND)
+
+plan: init
+	$(TF) plan -input=false -var-file=../../$(VARS) -out=$(PLAN)
+
+apply: require-env whoami
+	@test -f "$(STACK_DIR)/$(PLAN)" || { echo "run make plan ENV=$(ENV) STACK=$(STACK) first"; exit 1; }
+	$(TF) apply -input=false $(PLAN)
+	rm -f $(STACK_DIR)/$(PLAN)
+
+output: require-env whoami
+	$(TF) output
+
+# -- Deploy, migrate, roll back ----------------------------------------------------------
+#
+#   make deploy   ENV=prod STACK=ingestion   # plan, confirm, apply that plan, then (ingestion)
+#                                            # migrate; AUTO_APPROVE=1 skips the confirmation
+#   make migrate  ENV=prod                   # run the ingestion migrations (idempotent)
+#   make rollback ENV=prod FN=ingestion-prod-embed VERSION=12   # point the live alias back
+#   make versions ENV=prod FN=ingestion-prod-embed              # what rollback can go back to
+#
+# Migrations are expand-only (add tables, columns, indexes; never drop or rename what running
+# code reads), so code and schema may run in either order for a while. deploy applies first and
+# migrates right after; code that reaches a table or column before its migration fails
+# E_DB_SCHEMA, which is retried, so those runs recover. Remove things in a later release, once
+# no deployed version reads them (expand, then contract). docs/RUNBOOK.md "Deploy".
+
+MIGRATE_FN      ?= ingestion-$(ENV)-migrate:live
+MIGRATE_PAYLOAD ?= {"action": "migrate"}
+ALIAS           ?= live
+
+deploy:
+	@test -n "$(ENV)" || { echo "ENV is required, e.g. make deploy ENV=dev STACK=$(STACK)"; exit 1; }
+	$(MAKE) --no-print-directory plan ENV=$(ENV) STACK=$(STACK)
+	@[ -n "$(AUTO_APPROVE)" ] || { printf "Apply this plan to $(ENV)? Type the env name: "; read answer; [ "$$answer" = "$(ENV)" ]; } || { echo "not applied"; exit 1; }
+	$(MAKE) --no-print-directory apply ENV=$(ENV) STACK=$(STACK)
+	@if [ "$(STACK)" = "ingestion" ]; then $(MAKE) --no-print-directory migrate ENV=$(ENV); fi
+
+# Invokes the migrate function's live alias (the code this deploy published) and fails if the
+# function did. Safe to repeat: applied migrations are skipped.
+migrate:
+	@test -n "$(ENV)" || { echo "ENV is required, e.g. make migrate ENV=dev"; exit 1; }
+	@$(MAKE) --no-print-directory whoami ENV=$(ENV) STACK=ingestion
+	@out=$$(mktemp) && \
+	  status=$$($(CREDS) aws lambda invoke --function-name "$(MIGRATE_FN)" \
+	    --cli-binary-format raw-in-base64-out --payload '$(MIGRATE_PAYLOAD)' \
+	    --cli-read-timeout 330 --query FunctionError --output text "$$out") ; rc=$$? ; \
+	  cat "$$out"; echo; rm -f "$$out"; \
+	  if [ $$rc -ne 0 ] || [ "$$status" != "None" ]; then echo "migrate FAILED ($$status)"; exit 1; fi; \
+	  echo "migrate OK"
+
+# Moves FN's live alias to VERSION (one of `make versions`). Holds until the next apply, which
+# moves the alias to that apply's version: revert the code before deploying again.
+rollback:
+	@test -n "$(ENV)" -a -n "$(FN)" -a -n "$(VERSION)" || { echo "usage: make rollback ENV=<env> FN=<function name> VERSION=<n>"; exit 1; }
+	@case "$(FN)" in *-$(ENV)-*) ;; *) echo "$(FN) isn't a $(ENV) function"; exit 1 ;; esac
+	@$(MAKE) --no-print-directory whoami ENV=$(ENV) STACK=$(FN_STACK)
+	$(CREDS) aws lambda update-alias --function-name "$(FN)" --name $(ALIAS) --function-version "$(VERSION)" \
+	  --query '{alias: Name, version: FunctionVersion}' --output text
+
+versions:
+	@test -n "$(ENV)" -a -n "$(FN)" || { echo "usage: make versions ENV=<env> FN=<function name>"; exit 1; }
+	@$(MAKE) --no-print-directory whoami ENV=$(ENV) STACK=$(FN_STACK)
+	@$(CREDS) aws lambda get-alias --function-name "$(FN)" --name $(ALIAS) --query '{live: FunctionVersion}' --output text
+	@$(CREDS) aws lambda list-versions-by-function --function-name "$(FN)" \
+	  --query 'Versions[?Version!=`$$LATEST`].[Version, LastModified, CodeSha256]' --output text | tail -10
+
+# Data stores carry prevent_destroy and Aurora must go before its network resources, so
+# scripts/teardown.py runs the destroy: preflight, confirm, Aurora, terraform destroy, tables.
+# A failed run resumes when repeated. See docs/RUNBOOK.md "Tear down a disposable environment".
+DESTROY_FLAGS := $(if $(DRY_RUN),--dry-run) $(if $(FINAL_SNAPSHOT),--final-snapshot)
+
+destroy: require-env init
+	$(CREDS) python3 scripts/teardown.py --env $(ENV) --stack $(STACK) --var-file ../../$(VARS) $(DESTROY_FLAGS)
+
+# Reverse dependency order: ui reads both APIs and the producer key; ingestion reads the
+# producer's stream, bucket and key.
+DESTROY_ORDER := ui ingestion producer
+
+destroy-all:
+	@test -n "$(ENV)" || { echo "ENV is required, e.g. make destroy-all ENV=dev"; exit 1; }
+	@test -z "$(filter-out $(DESTROY_ORDER),$(notdir $(STACK_DIRS)))" || \
+	  { echo "add $(filter-out $(DESTROY_ORDER),$(notdir $(STACK_DIRS))) to DESTROY_ORDER"; exit 1; }
+	@for s in $(DESTROY_ORDER); do \
+	  [ -f envs/$(ENV)/$$s.tfvars ] || continue; \
+	  echo "== $$s"; \
+	  $(MAKE) --no-print-directory destroy ENV=$(ENV) STACK=$$s DRY_RUN=$(DRY_RUN) FINAL_SNAPSHOT=$(FINAL_SNAPSHOT) || exit 1; \
+	done
+
+# -- Upload UI (docs/UI.md) -----------------------------------------------------------------
+#
+#   make ui-build                 # npm ci + vite build -> services/ui/web/dist (no AWS)
+#   make ui-deploy   ENV=dev      # ui-build, upload to the site bucket, invalidate index.html
+#   make ui-password ENV=dev      # prompt for a username and password; store only the hash
+#   make ui-url      ENV=dev      # the CloudFront URL
+#   make ui-dev      ENV=dev      # Vite on localhost:5173, /api proxied to ENV's CloudFront
+#                                 # (UI_USER / UI_PASSWORD from your environment)
+#
+# They read the ui stack's outputs, so `make deploy ENV=<env> STACK=ui` comes first.
+
+UI_WEB  := $(CURDIR)/../services/ui/web
+UI_DIST := $(UI_WEB)/dist
+UI_OUT   = $(CREDS) cd stacks/ui && TF_DATA_DIR=.terraform/$(ENV) terraform output -raw
+
+ui-build:
+	cd $(UI_WEB) && npm ci && npm run build
+
+# Signs in as ENV's deploy role and points stacks/ui at ENV's state, quietly.
+ui-init:
+	@test -n "$(ENV)" || { echo "ENV is required, e.g. make ui-url ENV=dev"; exit 1; }
+	@$(MAKE) --no-print-directory init ENV=$(ENV) STACK=ui >/dev/null
+
+# Hashed assets are immutable and kept (a page still open may load them); everything else,
+# index.html first of all, is revalidated on every load.
+ui-deploy: ui-init ui-build
+	@test -f "$(UI_DIST)/index.html" || { echo "no $(UI_DIST)/index.html; did the build run?"; exit 1; }
+	@bucket=$$($(UI_OUT) site_bucket) && dist=$$($(UI_OUT) distribution_id) && \
+	  echo "== upload to s3://$$bucket" && \
+	  if [ -d "$(UI_DIST)/assets" ]; then \
+	    $(CREDS) aws s3 sync "$(UI_DIST)/assets" "s3://$$bucket/assets" --only-show-errors \
+	      --cache-control "public,max-age=31536000,immutable" || exit 1; \
+	  fi && \
+	  $(CREDS) aws s3 sync "$(UI_DIST)" "s3://$$bucket" --only-show-errors --delete \
+	    --exclude "assets/*" --cache-control "no-cache" && \
+	  echo "== invalidate $$dist" && \
+	  $(CREDS) aws cloudfront create-invalidation --distribution-id "$$dist" --paths "/index.html" "/" \
+	    --query Invalidation.Id --output text && \
+	  echo "deployed: $$($(UI_OUT) url)"
+
+# The password never reaches git, Terraform or the shell history: scripts/ui_password.sh reads
+# it without echo and stores sha256("Basic " + base64(user:password)) in the KeyValueStore.
+ui-password: ui-init
+	@kvs=$$($(UI_OUT) kvs_arn) && $(CREDS) scripts/ui_password.sh "$$kvs"
+
+ui-url: ui-init
+	@$(UI_OUT) url; echo
+
+ui-dev: ui-init
+	@url=$$($(UI_OUT) url) && echo "proxying /api to $$url" && \
+	  cd $(UI_WEB) && UI_API_TARGET="$$url" npm run dev
+
+# -- Static checks (CI) -----------------------------------------------------
+
+check: fmt validate test test-scripts lint
+
+fmt:
+	terraform fmt -check -recursive
+
+validate:
+	@for d in bootstrap $(STACK_DIRS) $(EXAMPLE_DIRS); do \
+	  echo "== validate $$d"; \
+	  (cd $$d && TF_DATA_DIR=.terraform/validate terraform init -backend=false -input=false >/dev/null && \
+	   TF_DATA_DIR=.terraform/validate terraform validate) || exit 1; \
+	done
+
+# Tests never call AWS. The bootstrap size check uses a real provider with dummy keys, which
+# would otherwise try to load the exported AWS_PROFILE.
+test:
+	@for d in bootstrap $(MODULE_DIRS) $(STACK_DIRS); do \
+	  [ -d $$d/tests ] || continue; \
+	  echo "== test $$d"; \
+	  (cd $$d && TF_DATA_DIR=.terraform/test terraform init -backend=false -input=false >/dev/null && \
+	   env -u AWS_PROFILE TF_DATA_DIR=.terraform/test terraform test) || exit 1; \
+	done
+
+test-scripts:
+	uvx ruff@$(RUFF_VERSION) check scripts && uvx ruff@$(RUFF_VERSION) format --check scripts
+	python3 -m unittest discover -s scripts/tests -t .
+	bash -n scripts/ui_password.sh
+	# CloudFront Functions (stacks/*/functions), with a stand-in for the cloudfront module.
+	node --test 'stacks/*/functions/*.test.mjs'
+
+# Remove all .terraform working dirs (providers, modules, backend config); `init` recreates them.
+clean:
+	find . -name .terraform -type d -prune -exec rm -rf {} +
+
+lint:
+	@tflint --version | grep -q "$(TFLINT_VERSION:v%=%)" || echo "warning: tflint isn't $(TFLINT_VERSION) (CI uses that one)"
+	tflint --init
+	tflint --recursive --config "$(CURDIR)/.tflint.hcl"
+	# Test files declare no infrastructure (and checkov's parser can't read some HCL test syntax).
+	uvx checkov==$(CHECKOV_VERSION) --directory . --framework terraform --quiet --compact --skip-path tests

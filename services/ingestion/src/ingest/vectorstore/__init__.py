@@ -1,0 +1,1 @@
+"""Aurora PostgreSQL + pgvector access."""

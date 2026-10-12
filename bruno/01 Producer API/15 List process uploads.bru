@@ -1,0 +1,27 @@
+meta {
+  name: List process uploads
+  type: http
+  seq: 15
+}
+
+get {
+  url: {{producerUrl}}/v1/processes/{{processId}}/uploads?limit=100
+  body: none
+  auth: inherit
+}
+
+params:query {
+  limit: 100
+}
+
+tests {
+  test("200, oldest first, with outcomes", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.items).to.be.an("array");
+    if (res.body.items.length) expect(res.body.items[0]).to.have.property("status");
+  });
+}
+
+docs {
+  Every upload ticket of the process, oldest first, whatever its outcome (PENDING ... REJECTED with a `reason`, EXPIRED). Paginated with `limit` (1-500) and `next_token`.
+}

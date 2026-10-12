@@ -1,0 +1,21 @@
+meta {
+  name: UC9 Unknown table is rejected
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{ingestionUrl}}/v1/tables/active
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "table": "no_such_table"
+  }
+}
+
+tests {
+  test("422", () => expect(res.status).to.equal(422));
+}

@@ -1,0 +1,51 @@
+[project]
+name = "ui-bff"
+version = "0.1.0"
+description = "Backend for the upload UI: a fixed allow-list of routes, signed with SigV4 and forwarded to the producer and control APIs."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aws-lambda-powertools>=3.0,<4",
+    "botocore>=1.35",  # SigV4 signing with the function role's credentials
+    "urllib3>=2.2,<3",  # HTTP client (botocore depends on it too)
+]
+
+[dependency-groups]
+dev = [
+    "botocore-stubs>=1.35",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bff"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PL", "PT"]
+ignore = ["PLR0913"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "PLR2004", "PLC0415", "PLR0917"]
+# The acceptance script compares HTTP status codes inline, like the tests.
+"scripts/**" = ["S101", "PLR2004"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+mypy_path = ["src"]
+packages = ["bff"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"

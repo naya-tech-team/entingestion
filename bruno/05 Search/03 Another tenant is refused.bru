@@ -1,0 +1,22 @@
+meta {
+  name: Another tenant is refused
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{ingestionUrl}}/v1/search
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "tenant_id": "someone-else",
+    "query": "anything"
+  }
+}
+
+tests {
+  test("403", () => expect(res.status).to.equal(403));
+}

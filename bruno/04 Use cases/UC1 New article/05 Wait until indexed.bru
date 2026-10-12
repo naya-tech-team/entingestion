@@ -1,0 +1,43 @@
+meta {
+  name: UC1 Wait until indexed
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{ingestionUrl}}/v1/articles/{{articleId}}/status
+  body: none
+  auth: inherit
+}
+
+script:post-response {
+  // Polls when run from the collection runner or bru run: repeats this request every
+  // 5 s until the article is INDEXED (or ended otherwise), up to 48 times.
+  const key = "poll_" + req.getName().replace(/[^A-Za-z0-9_.-]/g, "_");
+  const count = (bru.getVar(key) || 0) + 1;
+  const done = res.status === 200 && ["INDEXED", "FAILED_PERMANENT", "SKIPPED"].includes(res.body?.latest?.status) && (res.body.latest.status !== "INDEXED" || (res.body.steps || []).some(s => s.step === "FINALIZE" && s.step_status === "SUCCEEDED"));
+  if (!done && count < 48 && bru.runner) {
+    bru.setVar(key, count);
+    bru.setVar("pollPending", true); // the tests wait for the final poll
+    await bru.sleep(5000);
+    bru.runner.setNextRequest(req.getName());
+  } else {
+    bru.setVar(key, 0);
+    bru.setVar("pollPending", false);
+  }
+}
+
+tests {
+  if (!bru.getVar("pollPending")) {
+    test("INDEXED as version 1", () => {
+      expect(res.body?.latest?.status).to.equal("INDEXED");
+      expect(res.body.latest.doc_version).to.equal(1);
+      expect(res.body.latest.chunk_count).to.be.above(0);
+    });
+    test("one STREAM run, claim NEW, 8 steps succeeded", () => {
+      expect(res.body.runs[0].trigger).to.equal("STREAM");
+      expect(res.body.runs[0].claim).to.equal("NEW");
+      expect(res.body.steps.filter(s => s.step_status === "SUCCEEDED")).to.have.length(8);
+    });
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "description": "Proposes dependency upgrades as PRs; CI (including the license gate) checks each one.",
+  "labels": ["dependencies"],
+  "schedule": ["before 6am on monday"],
+  "lockFileMaintenance": { "enabled": true, "schedule": ["before 6am on the first day of the month"] },
+  "packageRules": [
+    { "matchManagers": ["pep621"], "groupName": "python dependencies (minor and patch)", "matchUpdateTypes": ["minor", "patch"] },
+    { "matchManagers": ["terraform"], "groupName": "terraform providers" },
+    { "matchManagers": ["github-actions"], "groupName": "github actions" },
+    {
+      "description": "Web UI (services/ui/web): exact versions, a 14-day cool-off for new releases",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["services/ui/web/package.json"],
+      "rangeStrategy": "pin",
+      "minimumReleaseAge": "14 days"
+    },
+    { "matchManagers": ["npm"], "groupName": "npm dependencies (minor and patch)", "matchUpdateTypes": ["minor", "patch"] }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "CycloneDX npm SBOM tool run with npx in CI",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": ["@cyclonedx/cyclonedx-npm@(?<currentValue>[0-9][^\\s]*)"],
+      "depNameTemplate": "@cyclonedx/cyclonedx-npm",
+      "datasourceTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "description": "Lint tool versions pinned in terraform/Makefile",
+      "managerFilePatterns": ["/^terraform/Makefile$/"],
+      "matchStrings": ["CHECKOV_VERSION \\?= (?<currentValue>\\S+)"],
+      "depNameTemplate": "checkov",
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^terraform/Makefile$/"],
+      "matchStrings": ["RUFF_VERSION    \\?= (?<currentValue>\\S+)"],
+      "depNameTemplate": "ruff",
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^terraform/Makefile$/"],
+      "matchStrings": ["TFLINT_VERSION  \\?= (?<currentValue>\\S+)"],
+      "depNameTemplate": "terraform-linters/tflint",
+      "datasourceTemplate": "github-releases"
+    }
+  ]
+}

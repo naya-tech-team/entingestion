@@ -1,0 +1,22 @@
+meta {
+  name: Process summary
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{ingestionUrl}}/v1/processes/{{processId}}/summary
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("200 with counts", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.counts).to.have.all.keys("indexed", "skipped", "failed");
+  });
+}
+
+docs {
+  Ingestion counts, the producer's counts, completion status and failures by error_code.
+}

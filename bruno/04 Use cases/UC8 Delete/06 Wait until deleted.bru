@@ -1,0 +1,37 @@
+meta {
+  name: UC8 Wait until deleted
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{ingestionUrl}}/v1/articles/{{articleId}}/status
+  body: none
+  auth: inherit
+}
+
+script:post-response {
+  // Polls when run from the collection runner or bru run: repeats this request every
+  // 5 s until LATEST is DELETED, up to 48 times.
+  const key = "poll_" + req.getName().replace(/[^A-Za-z0-9_.-]/g, "_");
+  const count = (bru.getVar(key) || 0) + 1;
+  const done = res.status === 200 && res.body?.latest?.status === "DELETED";
+  if (!done && count < 48 && bru.runner) {
+    bru.setVar(key, count);
+    bru.setVar("pollPending", true); // the tests wait for the final poll
+    await bru.sleep(5000);
+    bru.runner.setNextRequest(req.getName());
+  } else {
+    bru.setVar(key, 0);
+    bru.setVar("pollPending", false);
+  }
+}
+
+tests {
+  if (!bru.getVar("pollPending")) {
+    test("DELETED, run claim DELETE", () => {
+      expect(res.body?.latest?.status).to.equal("DELETED");
+      expect(res.body.runs[0].claim).to.equal("DELETE");
+    });
+  }
+}

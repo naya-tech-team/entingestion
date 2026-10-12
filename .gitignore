@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraform.tfstate.lock.info
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Provider lock files are committed for root stacks only (bootstrap, stacks/*).
+terraform/modules/**/.terraform.lock.hcl
+
+# Agent worktrees (Claude Code)
+.claude/worktrees/

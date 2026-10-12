@@ -1,0 +1,21 @@
+meta {
+  name: Delete article
+  type: http
+  seq: 10
+}
+
+delete {
+  url: {{producerUrl}}/v1/articles/{{articleId}}
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("204", () => {
+    expect(res.status).to.equal(204);
+  });
+}
+
+docs {
+  Removes the row (a tombstone keeps older uploads from reviving it); the stream REMOVE makes ingestion delete the vectors (UC8). `?purge=true` also erases every stored version of the raw files.
+}

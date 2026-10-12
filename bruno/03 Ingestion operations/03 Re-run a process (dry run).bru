@@ -1,0 +1,28 @@
+meta {
+  name: Re-run a process (dry run)
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{ingestionUrl}}/v1/processes/{{processId}}/ingest
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "only_failed": true,
+    "dry_run": true
+  }
+}
+
+tests {
+  test("200", () => {
+    expect(res.status).to.equal(200);
+  });
+}
+
+docs {
+  Re-runs a process's articles; `only_failed` limits it to failed ones.
+}

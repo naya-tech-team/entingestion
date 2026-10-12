@@ -1,0 +1,24 @@
+meta {
+  name: Article status
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{ingestionUrl}}/v1/articles/{{articleId}}/status
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("200 with LATEST, or 404 before ingestion has seen the article", () => {
+    expect([200, 404]).to.include(res.status);
+    if (res.status === 200) expect(res.body.latest).to.have.property("status");
+  });
+}
+
+docs {
+  `latest` (status, stage, doc_version, chunk_count, error_code), the last 5 `runs` (trigger,
+  claim, outcome), the latest run's `steps` (attempt, duration_ms, metrics, errors) and a console
+  link to the Step Functions execution.
+}

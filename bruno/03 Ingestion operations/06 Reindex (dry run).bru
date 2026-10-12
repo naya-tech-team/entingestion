@@ -1,0 +1,29 @@
+meta {
+  name: Reindex (dry run)
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{ingestionUrl}}/v1/reindex
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "target_table": "chunks_titan2_512",
+    "from_stage": "EMBED",
+    "dry_run": true
+  }
+}
+
+tests {
+  test("200", () => {
+    expect(res.status).to.equal(200);
+  });
+}
+
+docs {
+  How many articles a reindex would cover. Filters: `filter: {since, process_id, pipeline_version}`.
+}

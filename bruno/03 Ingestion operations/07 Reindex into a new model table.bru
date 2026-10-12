@@ -1,0 +1,36 @@
+meta {
+  name: Reindex into a new model table
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{ingestionUrl}}/v1/reindex
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "target_table": "chunks_titan2_512",
+    "from_stage": "EMBED"
+  }
+}
+
+script:pre-request {
+  // Starts real work. Folder and collection runs skip it unless the environment sets
+  // allowOperations: true; sending it on its own always runs it.
+  if (bru.runner && bru.getEnvVar("allowOperations") !== "true") {
+    bru.runner.skipRequest();
+  }
+}
+
+tests {
+  test("202", () => {
+    expect(res.status).to.equal(202);
+  });
+}
+
+docs {
+  UC9: re-embeds staged chunks into the target table through the reindex state machine and the backfill queue. Evaluate before switching.
+}

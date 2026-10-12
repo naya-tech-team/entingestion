@@ -1,0 +1,14 @@
+meta {
+  name: 05 Search
+  seq: 5
+}
+
+auth {
+  mode: inherit
+}
+
+docs {
+  Hybrid search (control API, search policy): the query is embedded with Titan, nearest vectors
+  and keyword matches are fused, one tenant at a time. The caller must read (or write) a source of
+  that tenant (producer `source_access`). Uses `tenantId` from the environment.
+}

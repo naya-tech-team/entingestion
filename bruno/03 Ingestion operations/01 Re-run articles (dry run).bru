@@ -1,0 +1,28 @@
+meta {
+  name: Re-run articles (dry run)
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{ingestionUrl}}/v1/ingest
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "article_ids": ["{{articleId}}"],
+    "dry_run": true
+  }
+}
+
+tests {
+  test("200", () => {
+    expect(res.status).to.equal(200);
+  });
+}
+
+docs {
+  Re-run articles (MANUAL). Without `force`, unchanged content is skipped.
+}

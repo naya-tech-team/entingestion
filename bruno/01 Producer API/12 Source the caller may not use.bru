@@ -1,0 +1,26 @@
+meta {
+  name: Source the caller may not use
+  type: http
+  seq: 12
+}
+
+post {
+  url: {{producerUrl}}/v1/processes
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "name": "Bruno forbidden",
+    "source": "not-configured"
+  }
+}
+
+tests {
+  test("403", () => expect(res.status).to.equal(403));
+}
+
+docs {
+  Sources without a `source_access` entry for the caller are refused.
+}

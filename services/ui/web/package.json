@@ -1,0 +1,33 @@
+{
+  "name": "entingestion-ui-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Upload and tracking UI for entingestion (static SPA served by CloudFront; talks only to /api/* and S3 presigned URLs).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "test": "vitest run",
+    "licenses": "node ../../../tools/check_npm_licenses.mjs"
+  },
+  "dependencies": {
+    "hash-wasm": "4.12.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router": "7.18.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  }
+}

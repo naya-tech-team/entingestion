@@ -1,0 +1,46 @@
+meta {
+  name: Create process
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{producerUrl}}/v1/processes
+  body: json
+  auth: inherit
+}
+
+headers {
+  Idempotency-Key: {{runTag}}-create
+}
+
+body:json {
+  {
+    "name": "Bruno {{runTag}}",
+    "source": "{{source}}",
+    "metadata": {"origin": "bruno"}
+  }
+}
+
+script:pre-request {
+  // A unique tag per run keeps articles and processes apart between runs.
+  bru.setVar("runTag", `${Date.now()}`);
+}
+
+script:post-response {
+  if (res.status === 201) bru.setVar("processId", res.body.process_id);
+}
+
+tests {
+  test("201 Created, OPEN", () => {
+    expect(res.status).to.equal(201);
+    expect(res.body.status).to.equal("OPEN");
+    expect(res.body.process_id).to.match(/^prc_/);
+  });
+}
+
+docs {
+  Registers a batch. The caller must be a writer of `source` (producer `source_access`), else
+  403. `expected_count` (uploads) is optional: set it now or at close. The Idempotency-Key makes
+  a retry return this same process (request 11). Saves `processId`.
+}

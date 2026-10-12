@@ -1,0 +1,4 @@
+node_modules/
+dist/
+sbom.json
+*.tsbuildinfo

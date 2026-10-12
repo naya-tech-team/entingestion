@@ -1,0 +1,32 @@
+meta {
+  name: Patch article metadata
+  type: http
+  seq: 8
+}
+
+patch {
+  url: {{producerUrl}}/v1/articles/{{articleId}}
+  body: json
+  auth: inherit
+}
+
+headers {
+  If-Match: {{articleEtag}}
+}
+
+body:json {
+  {
+    "metadata": {"origin": "bruno", "reviewed": "true"}
+  }
+}
+
+tests {
+  test("200", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.metadata.reviewed).to.equal("true");
+  });
+}
+
+docs {
+  Metadata only, applied only if the article hasn't changed since the GET (If-Match; 412 otherwise). Ingestion updates the chunks' metadata in place without re-embedding (a METADATA run, UC3); a title change re-runs the article. `tenant_id` is reserved (422).
+}

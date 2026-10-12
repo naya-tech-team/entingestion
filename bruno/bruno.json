@@ -1,0 +1,17 @@
+{
+  "version": "1",
+  "name": "entingestion",
+  "type": "collection",
+  "ignore": [
+    "node_modules",
+    ".git"
+  ],
+  "scripts": {
+    "moduleWhitelist": [
+      "crypto-js"
+    ],
+    "filesystemAccess": {
+      "allow": false
+    }
+  }
+}

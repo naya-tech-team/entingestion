@@ -1,0 +1,27 @@
+meta {
+  name: UC11 PUT
+  type: http
+  seq: 3
+}
+
+put {
+  url: {{uploadUrl}}
+  body: text
+  auth: none
+}
+
+body:text {
+  {{docText}}
+}
+
+script:pre-request {
+  // The ticket's headers are part of the presigned signature: send exactly these.
+  const headers = JSON.parse(bru.getVar("uploadHeaders") || "{}");
+  for (const [name, value] of Object.entries(headers)) {
+    req.setHeader(name, value);
+  }
+}
+
+tests {
+  test("200", () => expect(res.status).to.equal(200));
+}

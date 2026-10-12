@@ -1,0 +1,27 @@
+meta {
+  name: Redrive failed (dry run)
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{ingestionUrl}}/v1/dlq/redrive
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "dry_run": true
+  }
+}
+
+tests {
+  test("200", () => {
+    expect(res.status).to.equal(200);
+  });
+}
+
+docs {
+  Counts failed articles and DLQ messages that a redrive would re-run.
+}

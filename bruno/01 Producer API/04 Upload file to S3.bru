@@ -1,0 +1,35 @@
+meta {
+  name: Upload file to S3 (presigned PUT)
+  type: http
+  seq: 4
+}
+
+put {
+  url: {{uploadUrl}}
+  body: text
+  auth: none
+}
+
+body:text {
+  {{docText}}
+}
+
+script:pre-request {
+  // The ticket's headers are part of the presigned signature: send exactly these.
+  const headers = JSON.parse(bru.getVar("uploadHeaders") || "{}");
+  for (const [name, value] of Object.entries(headers)) {
+    req.setHeader(name, value);
+  }
+}
+
+tests {
+  test("200 from S3", () => {
+    expect(res.status).to.equal(200);
+  });
+}
+
+docs {
+  Sends the bytes straight to S3 (not through the API). Auth is none: the URL is presigned, and
+  S3 checks the SHA-256 header against the body. The registrar then verifies size and checksum
+  and writes the `articles` row (status STAGED), which starts ingestion.
+}

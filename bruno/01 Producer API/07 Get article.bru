@@ -1,0 +1,26 @@
+meta {
+  name: Get article
+  type: http
+  seq: 7
+}
+
+get {
+  url: {{producerUrl}}/v1/articles/{{articleId}}
+  body: none
+  auth: inherit
+}
+
+script:post-response {
+  if (res.status === 200) bru.setVar("articleEtag", res.headers["etag"]);
+}
+
+tests {
+  test("STAGED article", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.status).to.equal("STAGED");
+  });
+}
+
+docs {
+  The `articles` row: the contract with ingestion (s3_uri, s3_version_id, content_sha256, tenant_id set from the source, ...). Saves the `ETag` for a conditional PATCH.
+}

@@ -1,0 +1,103 @@
+{
+  "Comment": "Reindex / rebuild (brief §7.3): plan the indexed articles, then queue them in batches on the backfill queue with the target table and the step to start from.",
+  "StartAt": "Plan",
+  "States": {
+    "Plan": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${reindex_plan_arn}",
+        "Payload": {
+          "request.$": "$",
+          "execution_name.$": "$$.Execution.Name"
+        }
+      },
+      "ResultSelector": {
+        "bucket.$": "$.Payload.bucket",
+        "key.$": "$.Payload.key",
+        "count.$": "$.Payload.count"
+      },
+      "ResultPath": "$.plan",
+      "TimeoutSeconds": ${timeout_reindex_plan},
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": 6,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "AnyArticles"
+    },
+    "AnyArticles": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.plan.count",
+          "NumericEquals": 0,
+          "Next": "Done"
+        }
+      ],
+      "Default": "Enqueue"
+    },
+    "Enqueue": {
+      "Type": "Map",
+      "Comment": "Distributed Map over the planned article ids; each child queues one batch.",
+      "ItemReader": {
+        "Resource": "arn:aws:states:::s3:getObject",
+        "ReaderConfig": {
+          "InputType": "JSON"
+        },
+        "Parameters": {
+          "Bucket.$": "$.plan.bucket",
+          "Key.$": "$.plan.key"
+        }
+      },
+      "ItemBatcher": {
+        "MaxItemsPerBatch": ${batch_size},
+        "BatchInput": {
+          "target_table.$": "$.target_table",
+          "from_stage.$": "$.from_stage",
+          "requested_by.$": "$.requested_by"
+        }
+      },
+      "MaxConcurrency": ${max_concurrency},
+      "ToleratedFailurePercentage": 0,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "EXPRESS"
+        },
+        "StartAt": "Queue",
+        "States": {
+          "Queue": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${reindex_enqueue_arn}",
+              "Payload.$": "$"
+            },
+            "OutputPath": "$.Payload",
+            "TimeoutSeconds": ${timeout_reindex_enqueue},
+            "Retry": [
+              {
+                "ErrorEquals": ["Lambda.TooManyRequestsException", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                "IntervalSeconds": 5,
+                "BackoffRate": 2,
+                "MaxAttempts": 6,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "ResultPath": null,
+      "Next": "Done"
+    },
+    "Done": {
+      "Type": "Succeed"
+    }
+  }
+}

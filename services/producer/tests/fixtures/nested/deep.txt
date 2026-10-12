@@ -1,0 +1,1 @@
+Nested folder file, external_id keeps the relative path.

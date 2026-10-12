@@ -1,0 +1,151 @@
+"""Vector-table operations: the tables function (status, switch as ingest_ops) and what the
+migrate function still does (migrations, truncate unless ALLOW_TRUNCATE is false)."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
+
+import pytest
+
+from ingest import migrate, tables
+from ingest.config import get_settings
+from tests.unit.test_pipeline import FakeContext
+
+
+class RecordingConn:
+    """Records SQL; answers the view-definition query like Postgres would."""
+
+    def __init__(self) -> None:
+        self.sql: list[str] = []
+        self.commits = 0
+        self.rollbacks = 0
+
+    def execute(self, query: Any, params: Any = None) -> RecordingConn:
+        self.sql.append(query if isinstance(query, str) else query.as_string(None))
+        return self
+
+    def fetchone(self) -> tuple[str]:
+        return (" SELECT chunk_id\n   FROM chunks_titan2_1024\n  WHERE is_active;",)
+
+    def fetchall(self) -> list[Any]:
+        return []
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        yield
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+@pytest.fixture(autouse=True)
+def fresh_settings() -> Iterator[None]:
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_activate_switches_the_view_as_its_owner() -> None:
+    conn = RecordingConn()
+
+    out = migrate.activate(conn, "chunks_titan2_512")  # type: ignore[arg-type]
+
+    assert out == {"previous": "chunks_titan2_1024", "active_table": "chunks_titan2_512"}
+    switch = conn.sql[1:]
+    assert switch[0] == 'SET LOCAL ROLE "ingest_views"'  # first, so the new view keeps its owner
+    assert switch[1] == "DROP VIEW IF EXISTS chunks_active"
+    assert 'FROM "chunks_titan2_512" WHERE is_active' in switch[2]
+    assert "WITH (security_invoker = true)" in switch[2]  # readers stay in their tenant
+    assert switch[3].startswith("GRANT SELECT ON chunks_active TO ingest_reader")
+    assert conn.commits == 1  # committed even when the read above opened a transaction
+
+
+def test_tables_function_dispatches_on_a_clean_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = RecordingConn()
+    monkeypatch.setattr(tables, "connection", lambda settings: conn)
+    monkeypatch.setattr(tables, "status", lambda c: {"active_table": "x", "tables": {}})
+    calls: list[str] = []
+
+    def fake_activate(c: object, table: str) -> dict[str, str]:
+        calls.append(table)
+        return {"active_table": table}
+
+    monkeypatch.setattr(tables, "activate", fake_activate)
+
+    assert tables.handler({"action": "status"}, FakeContext())["active_table"] == "x"
+    out = tables.handler({"action": "activate", "table": "chunks_titan2_512"}, FakeContext())
+
+    assert out == {"active_table": "chunks_titan2_512"}
+    assert calls == ["chunks_titan2_512"]
+    assert conn.rollbacks == 4  # before and after each call: nothing left open when warm
+
+
+@pytest.mark.parametrize(
+    ("event", "error"),
+    [
+        ({"action": "truncate", "table": "chunks_titan2_512"}, ValueError),  # nothing else
+        ({"action": "activate", "table": "nope"}, ValueError),
+        ({"action": "migrate"}, ValueError),
+    ],
+)
+def test_tables_function_refuses_other_actions(
+    monkeypatch: pytest.MonkeyPatch, event: dict[str, Any], error: type[Exception]
+) -> None:
+    monkeypatch.setattr(tables, "connection", lambda settings: pytest.fail("no connection"))
+    with pytest.raises(error):
+        tables.handler(event, FakeContext())
+
+
+@pytest.mark.parametrize("action", ["status", "activate"])
+def test_migrate_no_longer_switches_tables(action: str) -> None:
+    with pytest.raises(ValueError, match="tables function"):
+        migrate.handler({"action": action, "table": "chunks_titan2_512"}, FakeContext())
+
+
+def test_truncate_is_refused_when_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALLOW_TRUNCATE", "false")
+    monkeypatch.setattr(migrate.boto3, "client", lambda *a, **k: pytest.fail("no secret read"))
+    event = {"action": "truncate", "table": "chunks_titan2_512", "confirm": "chunks_titan2_512"}
+
+    with pytest.raises(PermissionError, match="ALLOW_TRUNCATE"):
+        migrate.handler(event, FakeContext())
+
+
+def test_truncate_needs_confirmation_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(migrate.boto3, "client", lambda *a, **k: pytest.fail("no secret read"))
+    with pytest.raises(ValueError, match="confirm"):
+        migrate.handler({"action": "truncate", "table": "chunks_titan2_512"}, FakeContext())
+
+
+def test_truncate_is_allowed_by_default() -> None:
+    assert get_settings().allow_truncate
+
+
+# -- query function: which actions see every tenant ----------------------------------------
+
+
+def test_only_internal_query_actions_read_every_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ingest import query
+
+    conn = RecordingConn()
+    monkeypatch.setattr(query, "connection", lambda settings: conn)
+
+    query.handler({"action": "counts"}, FakeContext())  # type: ignore[arg-type]
+    assert any("app.all_tenants', 'on'" in q for q in conn.sql)
+
+    conn.sql.clear()
+    event = {"action": "search_hybrid", "tenant_id": "t-a", "vector": [0.1], "text": "x"}
+    assert query.handler(event, FakeContext()) == {"results": []}  # type: ignore[arg-type]
+    assert not any("'on'" in q for q in conn.sql)
+    assert any("set_config('app.tenant_id'" in q for q in conn.sql)
+    assert conn.rollbacks >= 2  # starts clean, ends clean
+
+    with pytest.raises(ValueError, match="tenant"):
+        query.handler(event | {"tenant_id": ""}, FakeContext())  # type: ignore[arg-type]

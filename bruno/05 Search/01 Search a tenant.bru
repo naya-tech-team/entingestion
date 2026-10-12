@@ -1,0 +1,31 @@
+meta {
+  name: Search a tenant
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{ingestionUrl}}/v1/search
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "tenant_id": "{{tenantId}}",
+    "query": "vector index lease",
+    "k": 5
+  }
+}
+
+tests {
+  test("200 with ranked chunks", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.results).to.be.an("array");
+    if (res.body.results.length) expect(res.body.results[0]).to.include.keys("chunk_id", "article_id", "text", "score");
+  });
+}
+
+docs {
+  Returns `results` with chunk text, `context` (the parent section with parent-child chunking), heading path, page and character range, source and score. `rerank: true` uses Bedrock rerank when it's enabled.
+}

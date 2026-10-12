@@ -1,0 +1,31 @@
+meta {
+  name: UC3 Create process
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{producerUrl}}/v1/processes
+  body: json
+  auth: inherit
+}
+
+body:json {
+  {
+    "name": "Bruno use case {{runTag}}",
+    "source": "{{source}}"
+  }
+}
+
+script:pre-request {
+  // A unique tag per run keeps articles and processes apart between runs.
+  bru.setVar("runTag", `${Date.now()}`);
+}
+
+script:post-response {
+  if (res.status === 201) bru.setVar("processId", res.body.process_id);
+}
+
+tests {
+  test("201", () => expect(res.status).to.equal(201));
+}

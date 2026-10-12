@@ -1,0 +1,14 @@
+meta {
+  name: UC3 Unchanged and metadata PATCH
+  seq: 3
+}
+
+auth {
+  mode: inherit
+}
+
+docs {
+  Re-registering identical content produces one SKIPPED run with no Bedrock or database work.
+  Patching metadata produces a METADATA run: the chunks' metadata is updated in place, no
+  re-embedding, no new version. Both count as skipped for the process.
+}
