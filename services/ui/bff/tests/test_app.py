@@ -32,6 +32,13 @@ ROUTES = [
     ("GET", f"/api/processes/{PID}/summary", "control", f"/prod/v1/processes/{PID}/summary"),
     ("GET", f"/api/processes/{PID}/articles", "control", f"/prod/v1/processes/{PID}/articles"),
     ("GET", f"/api/articles/{AID}/status", "control", f"/prod/v1/articles/{AID}/status"),
+    ("GET", "/api/ops/overview", "control", "/prod/v1/ops/overview"),
+    ("GET", "/api/ops/articles", "control", "/prod/v1/articles"),
+    ("GET", "/api/ops/tables", "control", "/prod/v1/tables"),
+    ("POST", "/api/ops/search", "control", "/prod/v1/search"),
+    ("POST", "/api/ops/ingest", "control", "/prod/v1/ingest"),
+    ("POST", f"/api/ops/processes/{PID}/ingest", "control", f"/prod/v1/processes/{PID}/ingest"),
+    ("POST", "/api/ops/dlq/redrive", "control", "/prod/v1/dlq/redrive"),
 ]
 
 
@@ -72,6 +79,16 @@ def test_each_route_reaches_its_upstream(
         ("GET", "/v1/processes"),
         ("GET", "/api/processes/a/b/uploads"),
         ("GET", "/"),
+        # Model operations and deletes stay CLI-only.
+        ("POST", "/api/ops/reindex"),
+        ("POST", "/api/ops/tables/active"),
+        ("DELETE", "/api/ops/tables/writes/x"),
+        ("POST", "/api/ops/tables"),
+        ("DELETE", "/api/ops/articles"),
+        ("GET", "/api/ops/ingest"),
+        ("GET", "/api/ops/dlq/redrive"),
+        ("POST", "/api/ops/overview"),
+        ("GET", "/api/ops"),
     ],
 )
 def test_anything_else_is_404(
@@ -100,6 +117,7 @@ def test_anything_else_is_404(
         ("POST", "/api/processes/{}/close"),
         ("GET", "/api/processes/{}/summary"),
         ("GET", "/api/articles/{}/status"),
+        ("POST", "/api/ops/processes/{}/ingest"),
     ],
 )
 def test_ids_are_validated(
@@ -136,26 +154,51 @@ def test_longest_valid_id_is_accepted(invoke: Invoke, control: FakeApi) -> None:
     ],
 )
 @pytest.mark.parametrize(
-    "path", ["/api/processes", f"/api/processes/{PID}/close", f"/api/processes/{PID}/uploads"]
+    "path",
+    [
+        "/api/processes",
+        f"/api/processes/{PID}/close",
+        f"/api/processes/{PID}/uploads",
+        "/api/ops/search",
+        "/api/ops/ingest",
+        f"/api/ops/processes/{PID}/ingest",
+        "/api/ops/dlq/redrive",
+    ],
 )
 def test_csrf_guard_on_posts(
-    invoke: Invoke, producer: FakeApi, headers: dict[str, str], allowed: bool, path: str
+    invoke: Invoke,
+    producer: FakeApi,
+    control: FakeApi,
+    headers: dict[str, str],
+    allowed: bool,
+    path: str,
 ) -> None:
     response = invoke("POST", path, headers=headers, body="{}")
 
+    upstream = control if path.startswith("/api/ops/") else producer
     if allowed:
         assert response["statusCode"] == 200
-        assert len(producer.requests) == 1
+        assert len(upstream.requests) == 1
     else:
         assert response["statusCode"] == 403
         assert _body(response) == {"message": "forbidden"}
-        assert producer.requests == []
+        assert producer.requests == control.requests == []
 
 
-def test_csrf_is_checked_before_the_id(invoke: Invoke) -> None:
-    response = invoke("POST", "/api/processes/a.b/close", body="{}")
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/api/processes/a.b/close", "{}"),
+        ("/api/ops/processes/a.b/ingest", "{}"),
+        ("/api/ops/ingest", "not json"),
+        ("/api/ops/ingest", json.dumps({"article_ids": [AID] * 101})),
+    ],
+)
+def test_csrf_is_checked_first(invoke: Invoke, control: FakeApi, path: str, body: str) -> None:
+    response = invoke("POST", path, body=body)
 
     assert response["statusCode"] == 403
+    assert control.requests == []
 
 
 def test_gets_need_no_csrf_header(invoke: Invoke, producer: FakeApi) -> None:
@@ -247,20 +290,29 @@ def test_idempotency_key_is_forwarded_on_posts(invoke: Invoke, producer: FakeApi
             f"/prod/v1/processes/{PID}/uploads?limit=500&next_token=a%2Bb%2Fc%3D",
         ),
         ("/api/processes", "source=a+b", "/prod/v1/processes?source=a%20b"),
+        (
+            "/api/ops/articles",
+            "status=FAILED_PERMANENT&limit=50&next_token=a%2Bb%3D",
+            "/prod/v1/articles?status=FAILED_PERMANENT&limit=50&next_token=a%2Bb%3D",
+        ),
+        ("/api/ops/tables", "tenant_id=acme", "/prod/v1/tables?tenant_id=acme"),
     ],
 )
 def test_query_is_passed_through_on_list_routes(
-    invoke: Invoke, producer: FakeApi, path: str, query: str, upstream_path: str
+    invoke: Invoke, producer: FakeApi, control: FakeApi, path: str, query: str, upstream_path: str
 ) -> None:
     invoke("GET", path, query=query)
 
-    assert producer.last.path == upstream_path
+    upstream = control if path.startswith("/api/ops/") else producer
+    assert upstream.last.path == upstream_path
 
 
-def test_query_is_dropped_elsewhere(invoke: Invoke, producer: FakeApi) -> None:
+def test_query_is_dropped_elsewhere(invoke: Invoke, producer: FakeApi, control: FakeApi) -> None:
     invoke("GET", f"/api/processes/{PID}", query="x=1")
-
     assert producer.last.path == f"/prod/v1/processes/{PID}"
+
+    invoke("GET", "/api/ops/overview", query="x=1")
+    assert control.last.path == "/prod/v1/ops/overview"
 
 
 # -- Upstream responses ------------------------------------------------------------------------
@@ -341,3 +393,160 @@ def test_bodies_are_not_logged(
     assert len(forwarded) == 1
     assert forwarded[0].__dict__["status"] == 200
     assert "body-marker" not in str([r.__dict__ for r in caplog.records])
+
+
+# -- Operations: guard rails -------------------------------------------------------------------
+
+ACTIONS = ["/api/ops/ingest", f"/api/ops/processes/{PID}/ingest", "/api/ops/dlq/redrive"]
+
+
+def test_ops_requests_are_signed(invoke: Invoke, control: FakeApi) -> None:
+    invoke("POST", "/api/ops/ingest", headers=UI_HEADERS, body='{"article_ids":["a"]}')
+    invoke("GET", "/api/ops/overview")
+
+    for request in control.requests:
+        assert request.headers["authorization"].startswith(
+            "AWS4-HMAC-SHA256 Credential=AKIDTESTING/"
+        )
+        assert "/us-west-2/execute-api/aws4_request" in request.headers["authorization"]
+        assert request.headers["x-amz-security-token"] == "session-token"
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/api/ops/ingest", {"article_ids": [AID], "force": True, "dry_run": True}),
+        ("/api/ops/ingest", {"article_ids": [f"art_{i}" for i in range(100)], "dry_run": False}),
+        (f"/api/ops/processes/{PID}/ingest", {"only_failed": True, "dry_run": True}),
+        ("/api/ops/dlq/redrive", {"error_code": "E_BUG", "max": 200, "dry_run": True}),
+        ("/api/ops/dlq/redrive", {"dry_run": True}),
+        ("/api/ops/search", {"tenant_id": "acme", "query": "kelp", "k": 5}),
+    ],
+)
+def test_ops_actions_forward_the_body_unchanged(
+    invoke: Invoke, control: FakeApi, path: str, payload: dict[str, Any]
+) -> None:
+    body = json.dumps(payload)
+    response = invoke("POST", path, headers={**UI_HEADERS, "Idempotency-Key": "k-1"}, body=body)
+
+    assert response["statusCode"] == 200
+    assert control.last.body == body.encode()
+    assert control.last.headers["idempotency-key"] == "k-1"
+    assert control.last.headers["content-type"] == "application/json"
+
+
+def test_dry_run_result_passes_through(invoke: Invoke, control: FakeApi) -> None:
+    control.body = {"dry_run": True, "count": 1, "messages": [{"article_id": AID}], "missing": []}
+    response = invoke(
+        "POST",
+        "/api/ops/ingest",
+        headers=UI_HEADERS,
+        body=json.dumps({"article_ids": [AID], "dry_run": True}),
+    )
+
+    assert response["statusCode"] == 200
+    assert _body(response) == control.body
+    assert json.loads(control.last.body)["dry_run"] is True
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "loc"),
+    [
+        ("/api/ops/ingest", {"article_ids": [f"art_{i}" for i in range(101)]}, "article_ids"),
+        ("/api/ops/ingest", {"article_ids": [AID], "from_stage": "CHUNK"}, "from_stage"),
+        ("/api/ops/ingest", {"article_ids": [AID], "from_stage": None}, "from_stage"),
+        ("/api/ops/dlq/redrive", {"max": 201}, "max"),
+        ("/api/ops/dlq/redrive", {"max": 5000, "dry_run": True}, "max"),
+        ("/api/ops/dlq/redrive", {"max": "10"}, "max"),
+        ("/api/ops/dlq/redrive", {"max": 10.0}, "max"),
+        ("/api/ops/dlq/redrive", {"max": True}, "max"),
+        ("/api/ops/dlq/redrive", {"max": None}, "max"),
+    ],
+)
+def test_ops_caps_are_422(
+    invoke: Invoke, control: FakeApi, path: str, payload: dict[str, Any], loc: str
+) -> None:
+    response = invoke("POST", path, headers=UI_HEADERS, body=json.dumps(payload))
+
+    assert response["statusCode"] == 422
+    body = _body(response)
+    assert body["message"] == "request validation failed"
+    assert [e["loc"] for e in body["errors"]] == [["body", loc]]
+    assert all(isinstance(e["msg"], str) for e in body["errors"])
+    assert control.requests == []
+
+
+def test_both_rerun_errors_are_reported(invoke: Invoke, control: FakeApi) -> None:
+    payload = {"article_ids": ["a"] * 101, "from_stage": "EMBED"}
+    response = invoke("POST", "/api/ops/ingest", headers=UI_HEADERS, body=json.dumps(payload))
+
+    assert response["statusCode"] == 422
+    locs = [e["loc"] for e in _body(response)["errors"]]
+    assert locs == [["body", "article_ids"], ["body", "from_stage"]]
+    assert control.requests == []
+
+
+@pytest.mark.parametrize("path", ACTIONS)
+@pytest.mark.parametrize("body", ["{", "not json", '{"a": 1,}', b"\xff\xfe"])
+def test_ops_bad_json_is_400(
+    invoke: Invoke, control: FakeApi, path: str, body: str | bytes
+) -> None:
+    response = invoke("POST", path, headers=UI_HEADERS, body=body)
+
+    assert response["statusCode"] == 400
+    assert _body(response) == {"message": "invalid JSON"}
+    assert control.requests == []
+
+
+@pytest.mark.parametrize("path", ACTIONS)
+@pytest.mark.parametrize("body", ["[]", '"x"', "1", "null"])
+def test_ops_body_must_be_an_object(invoke: Invoke, control: FakeApi, path: str, body: str) -> None:
+    response = invoke("POST", path, headers=UI_HEADERS, body=body)
+
+    assert response["statusCode"] == 422
+    assert _body(response)["errors"] == [{"loc": ["body"], "msg": "must be a JSON object"}]
+    assert control.requests == []
+
+
+@pytest.mark.parametrize("path", ACTIONS)
+def test_ops_empty_body_is_left_to_the_control_api(
+    invoke: Invoke, control: FakeApi, path: str
+) -> None:
+    control.status = 422
+    control.body = {"message": "request validation failed", "errors": []}
+    response = invoke("POST", path, headers=UI_HEADERS, body="")
+
+    assert response["statusCode"] == 422
+    assert len(control.requests) == 1
+
+
+def test_ops_actions_are_logged_without_bodies(
+    invoke: Invoke, control: FakeApi, caplog: pytest.LogCaptureFixture
+) -> None:
+    control.status = 202
+    control.body = {"dry_run": False, "count": 2, "queued": 2, "marker": "upstream-body-marker"}
+    payload = {"article_ids": ["art_body-marker-1", "art_body-marker-2"], "force": True}
+    with caplog.at_level("INFO"):
+        invoke("POST", "/api/ops/ingest", headers=UI_HEADERS, body=json.dumps(payload))
+        invoke(
+            "POST",
+            "/api/ops/dlq/redrive",
+            headers=UI_HEADERS,
+            body='{"error_code":"E_body-marker","dry_run":true}',
+        )
+
+    actions = [r.__dict__ for r in caplog.records if r.getMessage() == "ops action"]
+    assert [(a["route"], a["dry_run"], a["count"], a["status"]) for a in actions] == [
+        ("/v1/ingest", False, 2, 202),
+        ("/v1/dlq/redrive", True, None, 202),
+    ]
+    assert "body-marker" not in str([r.__dict__ for r in caplog.records])
+
+
+def test_rejected_ops_actions_are_not_logged_as_actions(
+    invoke: Invoke, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("INFO"):
+        invoke("POST", "/api/ops/ingest", headers=UI_HEADERS, body='{"from_stage":"EMBED"}')
+
+    assert [r for r in caplog.records if r.getMessage() == "ops action"] == []

@@ -27,9 +27,9 @@ BEGIN
   LIMIT 1;
   DROP VIEW chunks_active;
 
-  DROP INDEX chunks_titan2_1024_tsv;
-  DROP INDEX chunks_titan2_512_tsv;
-  ALTER TABLE chunks_titan2_1024
+  DROP INDEX chunks_primary_tsv;
+  DROP INDEX chunks_compact_tsv;
+  ALTER TABLE chunks_primary
     DROP COLUMN content_tsv,
     ADD COLUMN content_tsv tsvector GENERATED ALWAYS AS (
       setweight(to_tsvector('english'::regconfig, public.ingest_heading_text(heading_path)), 'A')
@@ -37,7 +37,7 @@ BEGIN
     ADD COLUMN parent_text text,
     ADD COLUMN char_start int,
     ADD COLUMN char_end int;
-  ALTER TABLE chunks_titan2_512
+  ALTER TABLE chunks_compact
     DROP COLUMN content_tsv,
     ADD COLUMN content_tsv tsvector GENERATED ALWAYS AS (
       setweight(to_tsvector('english'::regconfig, public.ingest_heading_text(heading_path)), 'A')
@@ -45,12 +45,12 @@ BEGIN
     ADD COLUMN parent_text text,
     ADD COLUMN char_start int,
     ADD COLUMN char_end int;
-  CREATE INDEX chunks_titan2_1024_tsv ON chunks_titan2_1024 USING gin (content_tsv) WHERE is_active;
-  CREATE INDEX chunks_titan2_512_tsv ON chunks_titan2_512 USING gin (content_tsv) WHERE is_active;
+  CREATE INDEX chunks_primary_tsv ON chunks_primary USING gin (content_tsv) WHERE is_active;
+  CREATE INDEX chunks_compact_tsv ON chunks_compact USING gin (content_tsv) WHERE is_active;
 
   EXECUTE format(
     'CREATE VIEW chunks_active WITH (security_invoker = true) AS SELECT * FROM %I WHERE is_active',
-    coalesce(live, 'chunks_titan2_1024'));
+    coalesce(live, 'chunks_primary'));
 END $$;
 
 ALTER VIEW chunks_active OWNER TO ingest_views;

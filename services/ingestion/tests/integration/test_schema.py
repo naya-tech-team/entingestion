@@ -14,7 +14,7 @@ MIGRATIONS = Path(__file__).parents[2] / "db" / "migrations"
 
 def insert_chunk(conn: Any, chunk_id: str, version: int, active: bool) -> None:
     conn.execute(
-        "INSERT INTO chunks_titan2_1024 (chunk_id, article_id, doc_version, ordinal, is_active,"
+        "INSERT INTO chunks_primary (chunk_id, article_id, doc_version, ordinal, is_active,"
         " tenant_id, text, embed_text, token_count, embedding, embedding_model, pipeline_version)"
         " VALUES (%s, 'art_1', %s, 0, %s, 'default', 'hello world', 'T > hello world', 2,"
         " %s::halfvec, 'amazon.titan-embed-text-v2:0', 'v1')",

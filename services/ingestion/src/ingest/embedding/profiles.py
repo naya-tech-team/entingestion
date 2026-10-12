@@ -4,8 +4,8 @@
 A profile is a name plus how to call its model. Its table is chunks_<name>, so the default
 profiles reproduce the tables that existed before profiles:
 
-    titan2_1024   bedrock  amazon.titan-embed-text-v2:0  1024  -> chunks_titan2_1024
-    titan2_512    bedrock  amazon.titan-embed-text-v2:0   512  -> chunks_titan2_512
+    primary   bedrock  amazon.titan-embed-text-v2:0  1024  -> chunks_primary
+    compact    bedrock  amazon.titan-embed-text-v2:0   512  -> chunks_compact
 
 Configured by Terraform (variable embedding_profiles) as JSON in the environment:
 
@@ -57,7 +57,7 @@ COHERE_V3_DIMENSIONS = frozenset({1024})
 COHERE_V4_DIMENSIONS = frozenset({256, 512, 1024, 1536})
 _FAMILY_MAX_TOKENS = {TITAN_V2: 8192, COHERE_V4: 128_000, COHERE: 512}
 
-DEFAULT_PROFILE = "titan2_1024"
+DEFAULT_PROFILE = "primary"
 TITAN_MODEL = "amazon.titan-embed-text-v2:0"
 
 
@@ -229,7 +229,7 @@ def builtin_profiles() -> dict[str, EmbeddingProfile]:
         for p in (
             EmbeddingProfile(DEFAULT_PROFILE, "bedrock", TITAN_MODEL, 1024),
             # Same model, 512 dimensions: smaller and cheaper to search (migration 002).
-            EmbeddingProfile("titan2_512", "bedrock", TITAN_MODEL, 512),
+            EmbeddingProfile("compact", "bedrock", TITAN_MODEL, 512),
         )
     }
 

@@ -25,6 +25,6 @@ GRANT ingest_views TO CURRENT_USER; -- the master user: hand the view over, and 
 -- An owner needs CREATE on the view's schema (to be given the view, and to create it again)
 -- and SELECT on every table it can serve. ingest_ops reads the tables through its membership.
 GRANT USAGE, CREATE ON SCHEMA public TO ingest_views;
-GRANT SELECT ON chunks_titan2_1024, chunks_titan2_512 TO ingest_views;
+GRANT SELECT ON chunks_primary, chunks_compact TO ingest_views;
 
 ALTER VIEW chunks_active OWNER TO ingest_views;

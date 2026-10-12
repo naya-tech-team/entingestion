@@ -4,7 +4,7 @@ chunks_<profile>; the migrate function creates the tables of new profiles
 (ingest.vectorstore.profile_tables), reindex fills them, and a switch makes one live.
 
 Each table keeps its own staged vectors and manifest, so re-embedding into a new table never
-overwrites what the current table can be rebuilt from. chunks_titan2_1024, the original table,
+overwrites what the current table can be rebuilt from. chunks_primary, the original table,
 keeps the original file names, so data staged before tables existed stays usable.
 """
 
@@ -19,7 +19,7 @@ from ingest.errors import ErrorCode, make_error
 from ingest.ids import STAGING_FILES, embedding_cache_key
 
 # The first table: its staged files have no table in their names.
-DEFAULT_TABLE = "chunks_titan2_1024"
+DEFAULT_TABLE = "chunks_primary"
 
 
 @dataclass(frozen=True)

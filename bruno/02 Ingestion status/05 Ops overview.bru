@@ -1,0 +1,23 @@
+meta {
+  name: Ops overview
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{ingestionUrl}}/v1/ops/overview
+  body: none
+  auth: inherit
+}
+
+tests {
+  test("200 with status counts and queue depths", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.statuses.FAILED_PERMANENT).to.have.all.keys("count", "oldest_at", "oldest_article_id");
+    expect(res.body.queues).to.have.property("ingest");
+  });
+}
+
+docs {
+  Count and oldest article of each in-progress status (CLAIMED … INDEXING, STAGED) and of FAILED_RETRYABLE / FAILED_PERMANENT, and the visible / in-flight depth of the ingest, ingest DLQ, backfill and backfill DLQ queues. A queue the API can't read shows `{"error": "unavailable"}`.
+}

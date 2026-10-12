@@ -13,7 +13,7 @@ from ingest.vectorstore.index import ArticleAttributes, IndexRow, PgVectorStore
 
 pytestmark = pytest.mark.integration
 
-TABLE = "chunks_titan2_1024"
+TABLE = "chunks_primary"
 
 
 def rows(

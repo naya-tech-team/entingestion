@@ -119,7 +119,7 @@ def test_eval_handler_scores_the_golden_set(env: Env, monkeypatch: pytest.Monkey
     s3.put_object(Bucket=STAGING_BUCKET, Key=evaluation.GOLDEN_POINTER, Body=key.encode())
     fake = FakeLambda(
         {
-            "describe": {"active_table": "chunks_titan2_1024", "dimension": 1024},
+            "describe": {"active_table": "chunks_primary", "dimension": 1024},
             "search": lambda e: {
                 "results": [
                     [{"chunk_id": "x", "article_id": "art_9", "score": 0.9},
@@ -134,15 +134,15 @@ def test_eval_handler_scores_the_golden_set(env: Env, monkeypatch: pytest.Monkey
 
     out = evaluation.handler({"table": None}, FakeContext())  # type: ignore[arg-type]
 
-    assert (out["table"], out["live"], out["questions"]) == ("chunks_titan2_1024", True, 1)
+    assert (out["table"], out["live"], out["questions"]) == ("chunks_primary", True, 1)
     assert out["dropped"] == {"deleted": 1, "stale": 1}  # art_2 deleted; art_3 is at v2 now
     assert out["recall_at_10"] == 1.0
     assert out["mrr"] == 0.5
     assert out["golden"] == key
     assert out["no_answer"]["mean_top_score"] == pytest.approx(0.3)
     report_key = out["report"].split("/", 3)[3]
-    assert report_key.startswith("_eval/chunks_titan2_1024/")
-    assert evaluation.latest_report("chunks_titan2_1024")["key"] == report_key  # type: ignore[index]
+    assert report_key.startswith("_eval/chunks_primary/")
+    assert evaluation.latest_report("chunks_primary")["key"] == report_key  # type: ignore[index]
 
 
 def test_a_baseline_run_also_scores_the_live_table(
@@ -155,7 +155,7 @@ def test_a_baseline_run_also_scores_the_live_table(
                   Body=json.dumps({"question": "q", "article_id": "art_1"}).encode())  # fmt: skip
     fake = FakeLambda(
         {
-            "describe": {"active_table": "chunks_titan2_1024", "dimension": 1024},
+            "describe": {"active_table": "chunks_primary", "dimension": 1024},
             "search": lambda e: {
                 "results": [[{"chunk_id": "c", "article_id": "art_1" if e["table"] else "art_2",
                               "score": 0.5}]]
@@ -167,11 +167,11 @@ def test_a_baseline_run_also_scores_the_live_table(
     monkeypatch.setattr(evaluation, "make_embedder", lambda profile: FakeTitan())
 
     out = evaluation.handler(  # type: ignore[arg-type]
-        {"table": "chunks_titan2_512", "baseline": True}, FakeContext()
+        {"table": "chunks_compact", "baseline": True}, FakeContext()
     )
 
     assert out["recall_at_10"] == 1.0  # the legacy, article-level set
-    assert out["baseline"]["table"] == "chunks_titan2_1024"
+    assert out["baseline"]["table"] == "chunks_primary"
     assert out["baseline"]["recall_at_10"] == 0.0
     assert out["delta"]["recall_at_10"] == 1.0
 
@@ -217,7 +217,7 @@ def test_drift_rebuilds_mismatches_and_removes_orphans(
     assert set(repairs) == {"art_1"}
     assert (repairs["art_1"]["from_stage"], repairs["art_1"]["target_table"]) == (
         "INDEX",
-        "chunks_titan2_1024",
+        "chunks_primary",
     )
     messages = {m["article_id"]: m for m in queued()}
     # Rows with no LATEST: the delete path runs anyway (force) so they don't linger.
@@ -232,7 +232,7 @@ def test_drift_writes_indexed_articles_missing_from_a_new_table(
     from ingest.vectorstore import registry
 
     run(message_from(produce("art_1", PAGE)))
-    registry.add_write(aws.status_store(), "chunks_titan2_512", "test")  # a model change began
+    registry.add_write(aws.status_store(), "chunks_compact", "test")  # a model change began
     monkeypatch.setattr(
         aws, "lambda_client", lambda: FakeLambda({"versions": {"rows": [], "next": None}})
     )
@@ -241,7 +241,7 @@ def test_drift_writes_indexed_articles_missing_from_a_new_table(
 
     repairs = backfill_queued()
     assert [(m["article_id"], m["target_table"], m["from_stage"]) for m in repairs] == [
-        ("art_1", "chunks_titan2_512", "EMBED")
+        ("art_1", "chunks_compact", "EMBED")
     ]
 
 

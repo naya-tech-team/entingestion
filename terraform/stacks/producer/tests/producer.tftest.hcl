@@ -544,6 +544,61 @@ run "alarms_match_brief" {
   }
 }
 
+run "principals_relative_to_the_account_get_its_arn" {
+  command = plan
+
+  variables {
+    admin_principals = ["role/entingestion-dev-deploy"]
+    source_access = {
+      news = {
+        tenant_id = "t-news"
+        writers   = ["role/news-*", "arn:aws:iam::210987654321:role/partner"]
+        readers   = ["user/analyst"]
+      }
+    }
+  }
+
+  assert {
+    condition = (
+      jsondecode(local.function_environment["SOURCE_ACCESS"]).admins == ["arn:aws:iam::123456789012:role/entingestion-dev-deploy"]
+      && jsondecode(local.function_environment["SOURCE_ACCESS"]).sources.news.writers == ["arn:aws:iam::123456789012:role/news-*", "arn:aws:iam::210987654321:role/partner"]
+      && jsondecode(local.function_environment["SOURCE_ACCESS"]).sources.news.readers == ["arn:aws:iam::123456789012:user/analyst"]
+    )
+    error_message = "Relative principals get this account's ARN (aws_account_id); full ARNs are kept."
+  }
+}
+
+run "operators_from_the_environment_write_every_source" {
+  command = plan
+
+  variables {
+    operator_principals = ["user/operator"]
+    source_access = {
+      news   = { tenant_id = "t-news", writers = ["role/news"] }
+      sports = { tenant_id = "t-sports", writers = ["user/operator"] }
+    }
+  }
+
+  assert {
+    condition = (
+      jsondecode(local.function_environment["SOURCE_ACCESS"]).sources.news.writers == ["arn:aws:iam::123456789012:role/news", "arn:aws:iam::123456789012:user/operator"]
+      && jsondecode(local.function_environment["SOURCE_ACCESS"]).sources.sports.writers == ["arn:aws:iam::123456789012:user/operator"]
+    )
+    error_message = "operator_principals are added (once) to every source's writers."
+  }
+}
+
+run "principals_must_be_relative_or_full_arns" {
+  command = plan
+
+  variables {
+    admin_principals = ["entingestion-dev-deploy"]
+    source_access    = { news = { tenant_id = "news", writers = ["some-user"] } }
+  }
+
+  expect_failures = [var.admin_principals, var.source_access]
+}
+
 run "sources_are_authorized_by_the_access_policy" {
   command = plan
 

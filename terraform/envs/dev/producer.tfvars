@@ -1,8 +1,7 @@
 # producer stack, dev. Code: terraform/stacks/producer. Usage: make plan ENV=dev STACK=producer
 
-env            = "dev"
-region         = "us-west-2"
-aws_account_id = "106751264162"
+env    = "dev"
+region = "us-west-2"
 
 mandatory_tags = {
   created_by           = "naveen"
@@ -39,9 +38,11 @@ alarm_emails = []
 # AWS Backup and cross-region copies are prod-only (not on the free plan).
 backup_enabled = false
 
-# Who may use which source (review C3). One tenant in dev; the tools run as bedrock-role (until
-# the deploy roles are in use) or as the dev deploy role.
-admin_principals = ["arn:aws:iam::106751264162:role/entingestion-dev-deploy"]
+# Who may use which source (review C3). One tenant in dev. Principals are written relative to the
+# account ("role/<name>", "user/<name>"); the stack prefixes arn:<partition>:iam::<AWS_ACCOUNT_ID>:.
+# People (Bruno, the CLI, acceptance scripts) aren't named here: they come from the environment,
+# OPERATOR_PRINCIPALS=user/<you> (make), and write every source.
+admin_principals = ["role/entingestion-dev-deploy"]
 source_access = {
   for source, tenant in {
     acceptance    = "internal"
@@ -49,13 +50,12 @@ source_access = {
     gate          = "internal"
     gate1k        = "internal"
     smoke         = "internal"
-    "tenant-test" = "t-small" # per-tenant model test: ingestion maps t-small to titan2_512
+    "tenant-test" = "t-small" # per-tenant model test: ingestion maps t-small to compact
     } : source => {
     tenant_id = tenant
     writers = [
-      "arn:aws:iam::106751264162:user/bedrock-role",
-      "arn:aws:iam::106751264162:role/entingestion-dev-deploy",
-      "arn:aws:iam::106751264162:role/ui-dev-bff", # the upload UI's BFF (terraform/stacks/ui)
+      "role/entingestion-dev-deploy",
+      "role/ui-dev-bff", # the upload UI's BFF (terraform/stacks/ui)
     ]
   }
 }

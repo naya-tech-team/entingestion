@@ -4,7 +4,7 @@ variable "region" {
 }
 
 variable "aws_account_id" {
-  description = "Account this bootstrap is applied in. Guards against applying with the wrong credentials."
+  description = "Account this bootstrap is applied in: TF_VAR_aws_account_id (export it from AWS_ACCOUNT_ID; never a tracked file). Guards against applying with the wrong credentials, and every ARN is derived from it."
   type        = string
 }
 
@@ -37,12 +37,12 @@ variable "mandatory_tags" {
 }
 
 variable "deploy_principal_arns" {
-  description = "IAM users or roles (people) who may assume the deploy roles and use the state bucket directly (break-glass)."
+  description = "IAM users or roles (people) who may assume the deploy roles and use the state bucket directly (break-glass): \"user/<name>\" or \"role/<name>\" in this account (the ARN is derived from aws_account_id), or a full ARN. From the environment, never a tracked file: TF_VAR_deploy_principal_arns='[\"user/<you>\"]'. The admin applying must be one of them."
   type        = list(string)
 
   validation {
-    condition     = length(var.deploy_principal_arns) > 0 && alltrue([for a in var.deploy_principal_arns : can(regex("^arn:aws[a-z-]*:iam::[0-9]{12}:(user|role)/", a))])
-    error_message = "deploy_principal_arns must list at least one IAM user or role ARN."
+    condition     = length(var.deploy_principal_arns) > 0 && alltrue([for a in var.deploy_principal_arns : can(regex("^(arn:aws[a-z-]*:iam::[0-9]{12}:)?(user|role)/", a))])
+    error_message = "deploy_principal_arns must list at least one IAM user or role: \"user/<name>\", \"role/<name>\" or a full ARN."
   }
 }
 

@@ -4,9 +4,11 @@ policies split readers (GET), searchers (POST /v1/search) and operators (everyth
     POST /v1/ingest                      re-run articles (MANUAL)
     POST /v1/processes/{id}/ingest       re-run a process's articles (via gsi2-process)
     POST /v1/dlq/redrive                 re-run failed articles by error_code; replay the DLQ
+    GET  /v1/articles?status=            LATEST items in one status, oldest first, paged
     GET  /v1/articles/{id}/status        LATEST, last 5 runs, latest run's steps, execution link
     GET  /v1/processes/{id}/summary      counters, producer counts, failures by error_code
     GET  /v1/processes/{id}/articles     each article's status (slim LATEST), at most 1000
+    GET  /v1/ops/overview                in-progress/failed counts and oldest; queue depths
     POST /v1/reindex                     reindex/rebuild into a vector table (state machine)
     GET  /v1/tables                      live table, write tables, row counts per table
     POST /v1/tables/active               switch the live table (go live / roll back), gated
@@ -21,6 +23,8 @@ on the default registry, whose live table chunks_active also serves.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from collections import Counter
 from datetime import date
@@ -31,6 +35,7 @@ from aws_lambda_powertools.event_handler import APIGatewayRestResolver, Response
 from aws_lambda_powertools.logging import correlation_paths
 from aws_lambda_powertools.metrics import MetricUnit
 from aws_lambda_powertools.utilities.typing import LambdaContext
+from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ingest import access, aws, evaluation, producer, requeue
@@ -38,10 +43,11 @@ from ingest import search as searching
 from ingest.config import get_settings
 from ingest.ids import new_run_id
 from ingest.models.messages import IngestMessage
-from ingest.models.status import ArticleStatus, StepName
+from ingest.models.status import TERMINAL_STATUSES, ArticleStatus, StepName
 from ingest.reindex import ReindexFilter, ReindexRequest, plan_items
 from ingest.status.store import Item, StatusStore
 from ingest.tenancy import Tenancy
+from ingest.timeutil import iso_now
 from ingest.vectorstore import registry
 from ingest.vectorstore.targets import TARGETS
 
@@ -57,6 +63,24 @@ _ARTICLE_FIELDS = (
     "indexed_at", "tenant_id",
 )  # fmt: skip
 _FAILED = (ArticleStatus.FAILED_PERMANENT, ArticleStatus.FAILED_RETRYABLE)
+# GET /v1/ops/overview: every status an article can be stuck in, and the failures. The settled
+# successes (INDEXED, SKIPPED*, DELETED) are left out: counting them would page the whole table.
+_OVERVIEW_STATUSES = tuple(
+    s for s in ArticleStatus if s not in TERMINAL_STATUSES or s is ArticleStatus.FAILED_PERMANENT
+)
+_OVERVIEW_QUEUES = (
+    ("ingest", "ingest_queue_url"),
+    ("ingest_dlq", "ingest_dlq_url"),
+    ("backfill", "backfill_queue_url"),
+    ("backfill_dlq", "backfill_dlq_url"),
+)
+# GET /v1/articles?status=
+DEFAULT_PAGE, MAX_PAGE = 50, 200
+_LISTED_FIELDS = (
+    "status", "stage", "process_id", "tenant_id", "doc_version", "error_code", "error_msg",
+    "updated_at",
+)  # fmt: skip
+_PAGE_KEYS = frozenset({"pk", "sk", "gsi1pk", "gsi1sk"})  # gsi1-status LastEvaluatedKey
 
 
 class _Request(BaseModel):
@@ -247,7 +271,12 @@ def _redrive_dlq(dry_run: bool) -> dict[str, Any]:
 
 def _queue_attributes(url: str) -> dict[str, str]:
     resp = aws.sqs().get_queue_attributes(
-        QueueUrl=url, AttributeNames=["QueueArn", "ApproximateNumberOfMessages"]
+        QueueUrl=url,
+        AttributeNames=[
+            "QueueArn",
+            "ApproximateNumberOfMessages",
+            "ApproximateNumberOfMessagesNotVisible",
+        ],
     )
     return {str(k): v for k, v in resp["Attributes"].items()}
 
@@ -513,6 +542,117 @@ def process_articles(process_id: str) -> Response[str]:
             ],
         },
     )
+
+
+@app.get("/v1/ops/overview")
+def ops_overview() -> Response[str]:
+    """How many articles are in each in-progress or failed status, the one that has been there
+    the longest, and the depth of each queue. A queue the role can't read doesn't fail the page;
+    one this deployment has no URL for is left out."""
+    store = aws.status_store()
+    statuses: dict[str, dict[str, Any]] = {}
+    for status in _OVERVIEW_STATUSES:
+        oldest = store.oldest_by_status(status)
+        statuses[status.value] = {
+            "count": store.count_by_status(status),
+            "oldest_at": (oldest.get("gsi1sk") or oldest.get("updated_at")) if oldest else None,
+            "oldest_article_id": oldest["pk"] if oldest else None,
+        }
+    return _json(200, {"statuses": statuses, "queues": _queue_depths(), "generated_at": iso_now()})
+
+
+def _queue_depths() -> dict[str, dict[str, Any]]:
+    settings = get_settings()
+    out: dict[str, dict[str, Any]] = {}
+    for name, field in _OVERVIEW_QUEUES:
+        url = str(getattr(settings, field))
+        if not url:
+            continue
+        try:
+            attrs = _queue_attributes(url)
+        except (ClientError, BotoCoreError) as err:
+            logger.warning("queue attributes unavailable", extra={"queue": name, "error": str(err)})
+            out[name] = {"error": "unavailable"}
+            continue
+        out[name] = {
+            "visible": int(attrs.get("ApproximateNumberOfMessages", 0)),
+            "in_flight": int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0)),
+        }
+    return out
+
+
+@app.get("/v1/articles")
+def articles_by_status() -> Response[str]:
+    """One page of the articles in a status (LATEST, slim), oldest first. next_token continues;
+    it is null on the last page (or after a full page that happens to be the last)."""
+    status = _status_param()
+    limit = _limit_param()
+    start = _decode_page_token(app.current_event.get_query_string_value("next_token"), status)
+    items, last_key = aws.status_store().page_by_status(status, start, limit)
+    return _json(
+        200,
+        {
+            "items": [
+                {"article_id": i["pk"]} | {k: i.get(k) for k in _LISTED_FIELDS} for i in items
+            ],
+            "next_token": _encode_page_token(last_key),
+        },
+    )
+
+
+def _status_param() -> ArticleStatus:
+    value = app.current_event.get_query_string_value("status") or ""
+    if not value:
+        raise BadRequest([{"loc": ["query", "status"], "msg": "status is required"}])
+    try:
+        return ArticleStatus(value)
+    except ValueError:
+        known = [s.value for s in ArticleStatus]
+        raise BadRequest(
+            [{"loc": ["query", "status"], "msg": f"unknown status; known: {known}"}]
+        ) from None
+
+
+def _limit_param() -> int:
+    value = app.current_event.get_query_string_value("limit")
+    if value is None or value == "":
+        return DEFAULT_PAGE
+    try:
+        limit = int(value)
+    except ValueError:
+        limit = 0
+    if not 1 <= limit <= MAX_PAGE:
+        raise BadRequest([{"loc": ["query", "limit"], "msg": f"an integer from 1 to {MAX_PAGE}"}])
+    return limit
+
+
+def _encode_page_token(last_key: dict[str, Any] | None) -> str | None:
+    """As the producer API's next_token: urlsafe base64 (unpadded) of the LastEvaluatedKey."""
+    if not last_key:
+        return None
+    raw = json.dumps(last_key, separators=(",", ":"), sort_keys=True, default=str)
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+
+def _decode_page_token(token: str | None, status: ArticleStatus) -> dict[str, Any] | None:
+    if not token:
+        return None
+    error = BadRequest([{"loc": ["query", "next_token"], "msg": "next_token is not valid"}])
+    try:
+        value = json.loads(base64.urlsafe_b64decode((token + "=" * (-len(token) % 4)).encode()))
+    except (binascii.Error, ValueError, UnicodeDecodeError) as err:
+        raise error from err
+    if (
+        not isinstance(value, dict)
+        or not {"pk", "gsi1pk"} <= value.keys() <= _PAGE_KEYS
+        or not all(isinstance(v, str) for v in value.values())
+    ):
+        raise error
+    if value["gsi1pk"] != status.value:
+        raise BadRequest(
+            [{"loc": ["query", "next_token"], "msg": "next_token belongs to another status"}]
+        )
+    return value
 
 
 @app.exception_handler(BadRequest)  # type: ignore[untyped-decorator]

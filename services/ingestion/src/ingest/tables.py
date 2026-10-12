@@ -2,7 +2,7 @@
 (brief §7.3), from inside the VPC as ingest_ops (IAM auth, no master credentials):
 
     {"action": "status"}                                 live table + row counts per table
-    {"action": "activate", "table": "chunks_titan2_512"} switch chunks_active (also rollback)
+    {"action": "activate", "table": "chunks_compact"} switch chunks_active (also rollback)
 
 ingest_ops can read the vector tables and act as the view's owner (ingest_views, migration 004);
 it can't write rows or change the schema. Migrations and truncate stay in the migrate function.

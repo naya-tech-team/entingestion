@@ -69,17 +69,17 @@ def fresh() -> Iterator[None]:
 
 def test_without_configuration_the_original_tables_stay() -> None:
     config = parse({})
-    assert config.default == "titan2_1024"
+    assert config.default == "primary"
     assert {p.table for p in config.profiles.values()} == {
-        "chunks_titan2_1024",
-        "chunks_titan2_512",
+        "chunks_primary",
+        "chunks_compact",
     }
-    assert config.profiles["titan2_512"].model == "amazon.titan-embed-text-v2:0"
+    assert config.profiles["compact"].model == "amazon.titan-embed-text-v2:0"
     assert config.tenants == {}
 
 
 def test_the_old_single_model_variables_still_pick_the_default() -> None:
-    assert parse({"TARGET_TABLE": "chunks_titan2_512"}).default == "titan2_512"
+    assert parse({"TARGET_TABLE": "chunks_compact"}).default == "compact"
     config = parse(
         {
             "TARGET_TABLE": "chunks_titan2_256",
@@ -95,11 +95,11 @@ def test_profiles_from_the_environment() -> None:
     config = parse(
         {
             "EMBEDDING_PROFILES": json.dumps(
-                {"titan2_1024": {**COHERE_V3, "model": "amazon.titan-embed-text-v2:0"}}
-                | {"cohere_m3": COHERE_V3, "litellm_512": LITELLM}
+                {"primary": {**COHERE_V3, "model": "amazon.titan-embed-text-v2:0"}}
+                | {"multilingual": COHERE_V3, "litellm_512": LITELLM}
             ),
-            "DEFAULT_PROFILE": "titan2_1024",
-            "TENANT_PROFILES": json.dumps({"t-new": "cohere_m3"}),
+            "DEFAULT_PROFILE": "primary",
+            "TENANT_PROFILES": json.dumps({"t-new": "multilingual"}),
         }
     )
     litellm = config.profiles["litellm_512"]
@@ -108,9 +108,9 @@ def test_profiles_from_the_environment() -> None:
         "https://litellm.example.com/v1",
         32,
     )
-    assert config.profiles["cohere_m3"].input_type("document") == "search_document"
-    assert config.profiles["cohere_m3"].input_type("query") == "search_query"
-    assert config.tenants == {"t-new": "cohere_m3"}
+    assert config.profiles["multilingual"].input_type("document") == "search_document"
+    assert config.profiles["multilingual"].input_type("query") == "search_query"
+    assert config.tenants == {"t-new": "multilingual"}
 
 
 @pytest.mark.parametrize(
@@ -157,19 +157,19 @@ def test_http_is_allowed_for_a_local_endpoint() -> None:
 
 
 def test_settings_carry_the_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EMBEDDING_PROFILES", json.dumps({"cohere_m3": COHERE_V3}))
-    monkeypatch.setenv("DEFAULT_PROFILE", "cohere_m3")
+    monkeypatch.setenv("EMBEDDING_PROFILES", json.dumps({"multilingual": COHERE_V3}))
+    monkeypatch.setenv("DEFAULT_PROFILE", "multilingual")
     settings = Settings.from_env()
-    assert settings.target_table == "chunks_cohere_m3"
+    assert settings.target_table == "chunks_multilingual"
     get_settings.cache_clear()
-    assert list(TARGETS) == ["chunks_cohere_m3"]
+    assert list(TARGETS) == ["chunks_multilingual"]
 
 
 # -- cache keys and staged file names --------------------------------------------------------
 
 
 def test_titan_keeps_its_cache_keys_and_others_add_a_fingerprint() -> None:
-    titan = Target(builtin_profiles()["titan2_1024"])
+    titan = Target(builtin_profiles()["primary"])
     assert titan.cache_key("hello").endswith("#amazon.titan-embed-text-v2:0@1024@norm")
     assert (titan.vectors_file, titan.manifest_file) == (
         "embeddings/vectors.parquet",
@@ -205,7 +205,7 @@ class FakeBedrock:
 
 def test_titan_sends_one_text_per_call() -> None:
     fake = FakeBedrock(lambda r: {"embedding": [0.6, 0.8], "inputTextTokenCount": 3})
-    profile = builtin_profiles()["titan2_512"]
+    profile = builtin_profiles()["compact"]
     model = bedrock_embedder(fake, profile)  # type: ignore[arg-type]
     assert isinstance(model, BedrockTitanEmbedder)
     assert model.batch_size == 1
@@ -499,8 +499,8 @@ def test_validate_flags_chunks_over_the_models_input_limit() -> None:
 def test_profile_input_limits_are_capped_by_the_model_family() -> None:
     cohere = EmbeddingProfile("c", "bedrock", "cohere.embed-english-v3", 1024)
     assert cohere.input_token_limit == 512
-    assert builtin_profiles()["titan2_1024"].input_token_limit == 8192
-    assert builtin_profiles()["titan2_1024"].per_input_tokens
+    assert builtin_profiles()["primary"].input_token_limit == 8192
+    assert builtin_profiles()["primary"].per_input_tokens
     assert not cohere.per_input_tokens
 
 
@@ -509,15 +509,15 @@ def test_a_pipeline_run_into_a_cohere_table(env: Env, monkeypatch: pytest.Monkey
     limit (the test page's chunks are small)."""
     store, _ = env
     monkeypatch.setenv(
-        "EMBEDDING_PROFILES", json.dumps({"cohere_m3": COHERE_V3, "titan2_1024": {
+        "EMBEDDING_PROFILES", json.dumps({"multilingual": COHERE_V3, "primary": {
             "provider": "bedrock", "model": "amazon.titan-embed-text-v2:0", "dimension": 1024}})
     )  # fmt: skip
-    monkeypatch.setenv("DEFAULT_PROFILE", "cohere_m3")
+    monkeypatch.setenv("DEFAULT_PROFILE", "multilingual")
     aws.reset()
 
     _, out = run(message_from(produce("art_c", PAGE)))
 
     assert out["action"] == "DONE"
     tables: dict[str, FakeVectorStore] = store.tables  # type: ignore[attr-defined]
-    assert {r["article_id"] for r in tables["chunks_cohere_m3"].rows.values()} == {"art_c"}
-    assert latest("art_c")["tv_chunks_cohere_m3"] == 1
+    assert {r["article_id"] for r in tables["chunks_multilingual"].rows.values()} == {"art_c"}
+    assert latest("art_c")["tv_chunks_multilingual"] == 1

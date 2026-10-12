@@ -416,6 +416,13 @@ data "aws_iam_policy_document" "control_api" {
     resources = [module.ingest_queue.queue_arn]
   }
 
+  # GET /v1/ops/overview: the backfill lane's queue depths (the ingest queues are above).
+  statement {
+    sid       = "BackfillQueueDepths"
+    actions   = ["sqs:GetQueueAttributes"]
+    resources = [module.backfill_queue.queue_arn, module.backfill_queue.dlq_arn]
+  }
+
   statement {
     sid       = "StartReindex"
     actions   = ["states:StartExecution"]

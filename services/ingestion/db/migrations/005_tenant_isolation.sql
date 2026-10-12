@@ -15,48 +15,48 @@
 --
 -- published_at and source are typed copies of the chunk metadata, for search filters.
 
-UPDATE chunks_titan2_1024 SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
-UPDATE chunks_titan2_512 SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+UPDATE chunks_primary SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+UPDATE chunks_compact SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
 
-ALTER TABLE chunks_titan2_1024
+ALTER TABLE chunks_primary
   ALTER COLUMN tenant_id SET NOT NULL,
-  ADD CONSTRAINT chunks_titan2_1024_tenant_set CHECK (tenant_id <> ''),
+  ADD CONSTRAINT chunks_primary_tenant_set CHECK (tenant_id <> ''),
   ADD COLUMN published_at date,
   ADD COLUMN source text;
-ALTER TABLE chunks_titan2_512
+ALTER TABLE chunks_compact
   ALTER COLUMN tenant_id SET NOT NULL,
-  ADD CONSTRAINT chunks_titan2_512_tenant_set CHECK (tenant_id <> ''),
+  ADD CONSTRAINT chunks_compact_tenant_set CHECK (tenant_id <> ''),
   ADD COLUMN published_at date,
   ADD COLUMN source text;
 
 -- Backfill from the metadata Index already wrote (published_at is ISO-8601 there).
-UPDATE chunks_titan2_1024 SET
+UPDATE chunks_primary SET
   source = metadata->>'source',
   published_at = CASE WHEN metadata->>'published_at' ~ '^\d{4}-\d{2}-\d{2}'
                       THEN left(metadata->>'published_at', 10)::date END;
-UPDATE chunks_titan2_512 SET
+UPDATE chunks_compact SET
   source = metadata->>'source',
   published_at = CASE WHEN metadata->>'published_at' ~ '^\d{4}-\d{2}-\d{2}'
                       THEN left(metadata->>'published_at', 10)::date END;
 
-CREATE INDEX chunks_titan2_1024_published_at ON chunks_titan2_1024 (published_at) WHERE is_active;
-CREATE INDEX chunks_titan2_1024_source ON chunks_titan2_1024 (source) WHERE is_active;
-CREATE INDEX chunks_titan2_512_published_at ON chunks_titan2_512 (published_at) WHERE is_active;
-CREATE INDEX chunks_titan2_512_source ON chunks_titan2_512 (source) WHERE is_active;
+CREATE INDEX chunks_primary_published_at ON chunks_primary (published_at) WHERE is_active;
+CREATE INDEX chunks_primary_source ON chunks_primary (source) WHERE is_active;
+CREATE INDEX chunks_compact_published_at ON chunks_compact (published_at) WHERE is_active;
+CREATE INDEX chunks_compact_source ON chunks_compact (source) WHERE is_active;
 
-ALTER TABLE chunks_titan2_1024 ENABLE ROW LEVEL SECURITY;
-ALTER TABLE chunks_titan2_512 ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chunks_primary ENABLE ROW LEVEL SECURITY;
+ALTER TABLE chunks_compact ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY reader_one_tenant ON chunks_titan2_1024 FOR SELECT TO ingest_reader
+CREATE POLICY reader_one_tenant ON chunks_primary FOR SELECT TO ingest_reader
   USING (tenant_id = current_setting('app.tenant_id', true)
          OR current_setting('app.all_tenants', true) = 'on');
-CREATE POLICY reader_one_tenant ON chunks_titan2_512 FOR SELECT TO ingest_reader
+CREATE POLICY reader_one_tenant ON chunks_compact FOR SELECT TO ingest_reader
   USING (tenant_id = current_setting('app.tenant_id', true)
          OR current_setting('app.all_tenants', true) = 'on');
-CREATE POLICY writer_all ON chunks_titan2_1024 TO ingest_writer USING (true) WITH CHECK (true);
-CREATE POLICY writer_all ON chunks_titan2_512 TO ingest_writer USING (true) WITH CHECK (true);
-CREATE POLICY views_read_all ON chunks_titan2_1024 FOR SELECT TO ingest_views USING (true);
-CREATE POLICY views_read_all ON chunks_titan2_512 FOR SELECT TO ingest_views USING (true);
+CREATE POLICY writer_all ON chunks_primary TO ingest_writer USING (true) WITH CHECK (true);
+CREATE POLICY writer_all ON chunks_compact TO ingest_writer USING (true) WITH CHECK (true);
+CREATE POLICY views_read_all ON chunks_primary FOR SELECT TO ingest_views USING (true);
+CREATE POLICY views_read_all ON chunks_compact FOR SELECT TO ingest_views USING (true);
 
 -- chunks_active again, on whichever table it serves now, checked as the caller. Its column
 -- list is fixed when it's created, so this also adds the new columns to it.
@@ -72,7 +72,7 @@ BEGIN
   DROP VIEW chunks_active;
   EXECUTE format(
     'CREATE VIEW chunks_active WITH (security_invoker = true) AS SELECT * FROM %I WHERE is_active',
-    coalesce(live, 'chunks_titan2_1024'));
+    coalesce(live, 'chunks_primary'));
 END $$;
 
 ALTER VIEW chunks_active OWNER TO ingest_views;

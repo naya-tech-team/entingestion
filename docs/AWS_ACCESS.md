@@ -51,11 +51,13 @@ The **state bucket** policy admits only the deploy roles, the people in `deploy_
 2. **Create the deploy roles** (an admin does this once per account, with their own login):
    ```bash
    aws login --profile entingestion          # opens the browser; sign in with MFA
+   export AWS_ACCOUNT_ID=<12-digit account> TF_VAR_aws_account_id=<same>
+   export TF_VAR_deploy_principal_arns='["user/<you>"]'   # you must be on it (see below)
    cd terraform/bootstrap
    AWS_PROFILE=entingestion terraform init && AWS_PROFILE=entingestion terraform apply
    terraform output deploy_role_arns
    ```
-   To add a person, add their user ARN to `deploy_principal_arns` in `terraform/bootstrap/terraform.tfvars` and apply again.
+   The people come from the environment, never a tracked file. To add someone, apply again with them in the list: `TF_VAR_deploy_principal_arns='["user/<you>","user/<them>"]'`. The ARN is derived from the account; a full ARN also works, for someone in another account. The plan refuses to run if you, the admin applying, aren't in the list: the state bucket policy would lock you out.
 3. **Add the profiles** to `~/.aws/config`. `aws login` writes the first one; you add the role profiles yourself:
    ```ini
    [profile entingestion]
@@ -63,13 +65,13 @@ The **state bucket** policy admits only the deploy roles, the people in `deploy_
    # login_session = …   (added by aws login)
 
    [profile entingestion-dev]
-   role_arn          = arn:aws:iam::106751264162:role/entingestion-dev-deploy
+   role_arn          = arn:aws:iam::<account>:role/entingestion-dev-deploy
    source_profile    = entingestion
    role_session_name = <your-name>
    region            = us-west-2
 
    [profile entingestion-prod]
-   role_arn          = arn:aws:iam::106751264162:role/entingestion-prod-deploy
+   role_arn          = arn:aws:iam::<account>:role/entingestion-prod-deploy
    source_profile    = entingestion
    role_session_name = <your-name>
    region            = us-west-2
@@ -126,7 +128,10 @@ eval "$(tools/aws-env.sh entingestion-dev)"
 | `AccessDenied` on `…/prod/…` state as the dev role | Working as intended: use `ENV=prod` with the prod profile |
 | Terraform: `no valid credential sources` while the CLI works | `AWS_EXPORT_CREDS=1 make …` |
 | `AccessDenied … iam:CreateRole` or `iam:PutRolePermissionsBoundary` | The workload boundary doesn't exist yet (apply bootstrap first), or the role isn't named `<stack>-<env>-*`, or `workload_boundary_enabled` is off |
-| `AccessDenied … s3:PutObject` on state | The backend has no `kms_key_id`: re-run `make init` with the current `envs/<env>/<stack>.s3.tfbackend` |
+| `AccessDenied … s3:PutObject` on state | The backend has no `kms_key_id`: re-run `make init`, which passes it from `AWS_ACCOUNT_ID` |
+| `AWS_ACCOUNT_ID must be the 12-digit account …` / `AWS_ACCOUNT_ID is … but the credentials are …` | Set `export AWS_ACCOUNT_ID=<account>` to the account you mean to deploy to, and use credentials for that account |
+| `SSL validation failed … CERTIFICATE_VERIFY_FAILED` | A TLS-inspecting proxy (Zscaler): set `AWS_CA_BUNDLE`; see [RUNBOOK](RUNBOOK.md#behind-a-tls-inspecting-proxy-zscaler) |
+| A script works on the wrong region (`us-east-1`) | boto3 ignores `AWS_REGION`: set `AWS_DEFAULT_REGION=us-west-2` too, or use `tools/aws-env.sh`, which sets both |
 
 ## Phase 2
 

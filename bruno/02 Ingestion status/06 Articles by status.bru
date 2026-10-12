@@ -1,0 +1,28 @@
+meta {
+  name: Articles by status
+  type: http
+  seq: 6
+}
+
+get {
+  url: {{ingestionUrl}}/v1/articles?status=FAILED_PERMANENT&limit=50
+  body: none
+  auth: inherit
+}
+
+params:query {
+  status: FAILED_PERMANENT
+  limit: 50
+}
+
+tests {
+  test("200 with a page of items", () => {
+    expect(res.status).to.equal(200);
+    expect(res.body.items).to.be.an("array");
+    expect(res.body).to.have.property("next_token");
+  });
+}
+
+docs {
+  One page of the articles in a status, oldest first (limit 1..200, default 50): article_id, status, stage, process_id, tenant_id, doc_version, error_code, error_msg, updated_at. Add `next_token` from the response to get the next page.
+}

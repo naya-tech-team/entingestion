@@ -24,8 +24,8 @@ deleted or no longer indexed are dropped, and so are those labelled for an older
 their article (its chunk ids changed): both are counted in the report.
 
     {"table": null}                                 the live table (chunks_active)
-    {"table": "chunks_titan2_512"}                  a reindexed table, before switching to it
-    {"table": "chunks_titan2_512", "baseline": true}  and the live table, for comparison
+    {"table": "chunks_compact"}                  a reindexed table, before switching to it
+    {"table": "chunks_compact", "baseline": true}  and the live table, for comparison
 
 Reports go to _eval/<table>/<YYYYMMDDTHHMMSSZ>.json (the switch gate reads the newest) and the
 scores to CloudWatch (namespace Ingestion).

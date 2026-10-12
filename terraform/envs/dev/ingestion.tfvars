@@ -1,8 +1,7 @@
 # ingestion stack, dev. Code: terraform/stacks/ingestion. Usage: make plan ENV=dev STACK=ingestion
 
-env            = "dev"
-region         = "us-west-2"
-aws_account_id = "106751264162"
+env    = "dev"
+region = "us-west-2"
 
 mandatory_tags = {
   created_by           = "naveen"
@@ -59,22 +58,22 @@ workload_boundary_enabled = false
 live_slots = 3
 
 # Embedding models (docs/ARCHITECTURE.md "Embedding models", RUNBOOK "Add a model"). The default
-# is the two Titan v2 tables (titan2_1024 live, titan2_512), as before profiles. To add a model,
+# is the two Titan v2 tables (primary live, compact), as before profiles. To add a model,
 # add a profile here, apply (make deploy: migrate creates chunks_<name>), then reindex/switch.
 # embedding_profiles = {
-#   titan2_1024 = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-#   titan2_512  = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
+#   primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+#   compact  = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
 #   # Cohere Embed Multilingual v3 on Bedrock (enable model access first). 512-token input limit:
 #   # Validate fails chunks above it, so chunk smaller (or use parent-child chunking) first.
-#   cohere_m3 = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
+#   multilingual = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
 #   # Later: any OpenAI-compatible endpoint, e.g. a LiteLLM proxy (reachable from the internet:
 #   # Embed runs outside the VPC). The API key lives in Secrets Manager under that name.
 #   # litellm_768 = { provider = "openai_compatible", model = "nomic-embed-text", dimension = 768,
 #   #                 base_url = "https://litellm.example.com/v1", api_key_secret = "entingestion/dev/litellm" }
 # }
-# default_profile = "titan2_1024"
+# default_profile = "primary"
 
 # A tenant's first table (its own registry), for new tenants. To try per-tenant routing, map a
 # test tenant to the 512-d table and give a producer source that tenant (producer.tfvars
 # source_access, e.g. "tenant-test" = { tenant_id = "t-small", writers = [...] }):
-tenant_profiles = { "t-small" = "titan2_512" } # test tenant on the 512-d model (source tenant-test)
+tenant_profiles = { "t-small" = "compact" } # test tenant on the 512-d model (source tenant-test)

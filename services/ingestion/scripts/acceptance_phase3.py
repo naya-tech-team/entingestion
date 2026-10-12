@@ -151,7 +151,7 @@ def table_reaches(ctx: Ctx, table: str, articles: int) -> dict[str, Any] | None:
 
 def uc9(ctx: Ctx) -> None:
     print("UC9: model change -> new table filled from staged chunks; view switched; rollback works")
-    new, live = "chunks_titan2_512", "chunks_titan2_1024"
+    new, live = "chunks_compact", "chunks_primary"
     before = tables(ctx)
     ctx.check(before["active_table"] == live, f"live table {before['active_table']}", "UC9")
     expected = before["tables"][live]["active_articles"]
@@ -171,7 +171,7 @@ def uc9(ctx: Ctx) -> None:
 
 def uc10(ctx: Ctx) -> None:
     print("UC10: rebuild -> truncate, from_stage=INDEX restores row counts, zero Bedrock calls")
-    live = "chunks_titan2_1024"
+    live = "chunks_primary"
     before = tables(ctx)["tables"][live]
     since = time.time()
     payload = json.dumps({"action": "truncate", "table": live, "confirm": live}).encode()

@@ -13,4 +13,8 @@ if [[ -z "$profile" ]]; then
   exit 2
 fi
 aws configure export-credentials --profile "$profile" --format env
-echo "export AWS_REGION=$(aws configure get region --profile "$profile" || echo us-west-2)"
+# Both names: the AWS CLI and most SDKs read AWS_REGION, but boto3 (the Python scripts,
+# teardown.py) reads only AWS_DEFAULT_REGION and otherwise falls back to the default profile's.
+region=$(aws configure get region --profile "$profile" || echo us-west-2)
+echo "export AWS_REGION=$region"
+echo "export AWS_DEFAULT_REGION=$region"

@@ -3,7 +3,7 @@
 
 locals {
   steps       = ["FETCH", "EXTRACT", "NORMALIZE", "CHUNK", "EMBED", "VALIDATE", "INDEX", "FINALIZE"]
-  eval_tables = ["chunks_titan2_1024", "chunks_titan2_512"] # vectorstore/targets.py
+  eval_tables = ["chunks_primary", "chunks_compact"] # vectorstore/targets.py
   svc         = ["service", "ingestion"]
   sfn         = ["StateMachineArn", module.ingest_workflow.state_machine_arn]
   db_dim      = local.use_aurora ? ["DBClusterIdentifier", one(module.db[*].cluster_id)] : ["DBInstanceIdentifier", one(module.rds[*].instance_id)]

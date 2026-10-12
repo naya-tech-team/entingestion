@@ -150,12 +150,12 @@ The whole Bruno collection (`npx @usebruno/cli@4.1.0 run -r --env dev`) passed o
 ### UC9. Model change
 - **Run:**
   - Bruno `04 Use cases / UC9 Model change (dry run)` checks the plan without changing anything.
-  - The full flow is `scripts/acceptance_phase3.py uc9`, or by hand: `03 Ingestion operations / 07` (reindex), then `scripts/evaluate.py --table chunks_titan2_512`, then `09` (switch), then `10` (roll back).
+  - The full flow is `scripts/acceptance_phase3.py uc9`, or by hand: `03 Ingestion operations / 07` (reindex), then `scripts/evaluate.py --table chunks_compact`, then `09` (switch), then `10` (roll back).
 - **Expect:**
   - the new table is filled from the staged `chunks/`, while the live table keeps serving;
   - the view switches; rollback works;
   - Embed writes the new model's vectors to separate staged files.
-- **Verified:** dev. All 23 articles were re-embedded into `chunks_titan2_512`; the switch and the rollback both worked. Evaluation: 1024 table recall@10 1.00 / MRR 0.877; 512 table 1.00 / 0.888.
+- **Verified:** dev. All 23 articles were re-embedded into `chunks_compact`; the switch and the rollback both worked. Evaluation: 1024 table recall@10 1.00 / MRR 0.877; 512 table 1.00 / 0.888.
 
 ### UC10. Rebuild from staging
 - **Run:** `scripts/acceptance_phase3.py uc10`. It truncates a table through `migrate`, which needs a confirm, then reindexes with `from_stage: INDEX`.

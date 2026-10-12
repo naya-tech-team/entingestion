@@ -204,14 +204,14 @@ The limit is 500 MB (Textract async). **Status:** built and unit-tested; it need
 
 **Preconditions:** the new table exists (W13).
 
-1. **Dry run.** `POST /v1/reindex {"target_table": "chunks_titan2_512", "from_stage": "EMBED", "dry_run": true}` returns the article count. Narrow it with `filter: {since, process_id, pipeline_version}`.
+1. **Dry run.** `POST /v1/reindex {"target_table": "chunks_compact", "from_stage": "EMBED", "dry_run": true}` returns the article count. Narrow it with `filter: {since, process_id, pipeline_version}`.
 2. **Start.** The same call without `dry_run` returns 202 and the execution link. The reindex state machine:
    - **Plan:** `reindex_plan` writes the article list to `_reindex/<execution>.json` (it expires after 7 days).
    - **AnyArticles:** if there are none, it's done.
    - **Enqueue:** a Distributed Map reads the plan in batches (EXPRESS children). `reindex_enqueue` sends messages with `trigger = BACKFILL` and `target_table` to the backfill queue.
 3. **Runs.** The dispatcher starts each run at Embed. Embed uses the target's model and dimension, and writes `embeddings/<table>.parquet` and `_manifest.<table>.json`, so the live table's staged files are untouched. Index loads the target table; the live table keeps serving.
-4. **Evaluate:** `uv run python scripts/evaluate.py --env <env> --table chunks_titan2_512 --min-recall10 0.9`. It compares against the live table's baseline.
-5. **Switch:** `POST /v1/tables/active {"table": "chunks_titan2_512"}`. The `chunks_active` view is replaced in one transaction.
+4. **Evaluate:** `uv run python scripts/evaluate.py --env <env> --table chunks_compact --min-recall10 0.9`. It compares against the live table's baseline.
+5. **Switch:** `POST /v1/tables/active {"table": "chunks_compact"}`. The `chunks_active` view is replaced in one transaction.
 6. **Roll back if needed:** the same call with the old table. Both tables keep their rows.
 
 **Watch it:** the backfill queue depth on the dashboard and the reindex execution in Step Functions. On dev, the 10-concurrency limit makes this slow. Bruno: `04 Use cases / UC9 Model change (dry run)` and `03 Ingestion operations / 06–10`.
@@ -220,7 +220,7 @@ The limit is 500 MB (Textract async). **Status:** built and unit-tested; it need
 
 **When:** rows were lost or corrupted, or the drift check reports many mismatches.
 
-1. `POST /v1/reindex {"target_table": "chunks_titan2_1024", "from_stage": "INDEX"}`.
+1. `POST /v1/reindex {"target_table": "chunks_primary", "from_stage": "INDEX"}`.
 2. Each run starts at Index and reloads the staged vectors (`embeddings/…parquet`) with the same swap as W2. **No Bedrock calls**: cost and time are database writes only.
 3. Check with `GET /v1/tables`: row and article counts per table.
 
@@ -228,8 +228,8 @@ Verified on dev (UC10): the live table was truncated, then restored to 130 rows 
 
 ## W13. Add a vector table for a new model
 
-1. **Migration.** Add `services/ingestion/db/migrations/00N_<table>.sql`, modelled on `002_chunks_titan2_512.sql`:
-   - `CREATE TABLE … (LIKE chunks_titan2_1024 INCLUDING DEFAULTS INCLUDING GENERATED)`;
+1. **Migration.** Add `services/ingestion/db/migrations/00N_<table>.sql`, modelled on `002_chunks_compact.sql`:
+   - `CREATE TABLE … (LIKE chunks_primary INCLUDING DEFAULTS INCLUDING GENERATED)`;
    - set the embedding column to `halfvec(<dim>)` and add the primary key;
    - create the HNSW, version, GIN and tenant indexes;
    - grant `ingest_writer` and `ingest_reader`.

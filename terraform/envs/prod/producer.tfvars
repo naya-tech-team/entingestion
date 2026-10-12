@@ -1,8 +1,7 @@
 # producer stack, prod. Code: terraform/stacks/producer. Usage: make plan ENV=prod STACK=producer
 
-env            = "prod"
-region         = "us-west-2"
-aws_account_id = "106751264162"
+env    = "prod"
+region = "us-west-2"
 
 mandatory_tags = {
   created_by           = "naveen"
@@ -44,8 +43,8 @@ registrar_reserved_concurrency = 10
 api_reserved_concurrency       = 10
 
 # Who may use which source (review C3); required before the first prod apply, e.g.
-#   source_access = { news = { tenant_id = "news", writers = ["arn:aws:iam::<acct>:role/news-feed"],
-#                              readers = ["arn:aws:iam::<acct>:role/search-*"] } }
-admin_principals = ["arn:aws:iam::106751264162:role/entingestion-prod-deploy"]
+#   source_access = { news = { tenant_id = "news", writers = ["role/news-feed"],
+#                              readers = ["role/search-*"] } }
+admin_principals = ["role/entingestion-prod-deploy"]
 source_access    = {}
 

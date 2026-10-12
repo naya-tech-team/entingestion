@@ -6,7 +6,7 @@ variable "region" {
 }
 
 variable "aws_account_id" {
-  description = "Account this environment deploys to. The provider refuses to run against any other."
+  description = "Account this environment deploys to: TF_VAR_aws_account_id, which the Makefile sets from AWS_ACCOUNT_ID (never a tracked file). The provider refuses to run against any other, and ARNs are derived from it."
   type        = string
 
   validation {

@@ -12,7 +12,7 @@ m3      Retrieval: an HTML table's cell text isn't duplicated; POST /v1/search f
         for its tenant (and filters by source), refuses another tenant; a metadata PATCH is a
         METADATA run; the switch to a table without a fresh evaluation is refused (409).
 tenants Per-tenant models: an article of tenant t-small (source tenant-test, mapped to the
-        titan2_512 profile) is written only to chunks_titan2_512, its tenant's live table; search
+        compact profile) is written only to chunks_compact, its tenant's live table; search
         for t-small embeds with that model and finds it; the default tenant doesn't see it.
 m2      Producer: an unconfigured source is refused (403); a retried POST with the same
         Idempotency-Key is the same process; two uploads of one article in one process still
@@ -38,7 +38,7 @@ from acceptance_phase2 import Ctx, article_text, in_status, wait
 from acceptance_phase3 import reindex, tables
 from gate_phase1 import tf_output
 
-LIVE, NEW = "chunks_titan2_1024", "chunks_titan2_512"
+LIVE, NEW = "chunks_primary", "chunks_compact"
 
 
 def _ingest(ctx: Ctx, filename: str, tag: str) -> str:
@@ -302,7 +302,7 @@ def m3(ctx: Ctx) -> None:
 
 
 def tenants(ctx: Ctx) -> None:
-    print("TENANTS: per-tenant embedding model routing (t-small -> titan2_512)")
+    print("TENANTS: per-tenant embedding model routing (t-small -> compact)")
     tag = f"zt{uuid.uuid4().hex[:8]}"
     with tempfile.TemporaryDirectory() as tmp:
         (Path(tmp) / f"{tag}.txt").write_bytes(article_text(f"tenant {tag}"))

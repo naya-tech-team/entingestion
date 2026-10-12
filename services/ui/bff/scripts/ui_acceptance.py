@@ -6,8 +6,10 @@
 
 It drives the UI's own path (CloudFront -> BFF -> APIs, plus the browser's presigned PUT):
 the login gate, the direct-origin denials, the security headers, the CSRF guard and route
-allow-list, then one batch through to INDEXED. The articles are deleted afterwards through
-the producer API, signed with your AWS credentials (the BFF can't delete).
+allow-list, then one batch through to INDEXED. Then the Operations routes: the overview, the
+failed list, search, a dry-run and a real (force) re-run of one article, a dry-run re-run of
+the process's failures and of the DLQ, and the BFF's caps. The articles are deleted
+afterwards through the producer API, signed with your AWS credentials (the BFF can't delete).
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ SAMPLES = {
     ),
 }
 FINAL = {"COMPLETE", "COMPLETE_WITH_ERRORS"}
+RERUN_TIMEOUT = 300
 
 failures: list[str] = []
 
@@ -141,7 +144,7 @@ def guards(ui: Ui) -> None:
     check(status == 404, f"unlisted route -> 404 (got {status})")
 
 
-def batch(ui: Ui) -> list[str]:
+def batch(ui: Ui) -> tuple[str | None, list[str]]:
     status, sources = ui.get("/api/sources")
     writable = {s["source"] for s in (sources or {}).get("items", []) if s["access"] == "write"}
     check(status == 200 and SOURCE in writable, f"/api/sources lists {SOURCE} as writable")
@@ -149,7 +152,7 @@ def batch(ui: Ui) -> list[str]:
     status, proc = ui.post("/api/processes", {"name": "ui acceptance", "source": SOURCE})
     check(status == 201, f"create process -> 201 (got {status}: {proc})")
     if status != 201:
-        return []
+        return None, []
     pid = proc["process_id"]
     print(f"     process {pid}")
 
@@ -215,7 +218,102 @@ def batch(ui: Ui) -> list[str]:
         status, detail = ui.get(f"/api/articles/{articles[0]}/status")
         steps = [s["step"] for s in (detail or {}).get("steps", [])]
         check(status == 200 and "FINALIZE" in steps, f"article status has steps: {steps}")
-    return articles
+    return pid, articles
+
+
+def operations(ui: Ui, pid: str, articles: list[str]) -> None:
+    """The Operations tab's routes, on the batch just indexed (docs/UI.md "Operations")."""
+    status, overview = ui.get("/api/ops/overview")
+    check(
+        status == 200 and isinstance(overview, dict) and {"queues", "statuses"} <= overview.keys(),
+        f"ops overview -> 200 with queues and statuses (got {status})",
+    )
+    status, failed = ui.get("/api/ops/articles?status=FAILED_PERMANENT&limit=10")
+    check(
+        status == 200 and isinstance(failed, dict) and "items" in failed,
+        f"ops articles FAILED_PERMANENT -> 200 (got {status})",
+    )
+
+    _, sources = ui.get("/api/sources")
+    tenant = next(
+        (s["tenant_id"] for s in (sources or {}).get("items", []) if s["source"] == SOURCE), None
+    )
+    check(tenant is not None, f"/api/sources gives {SOURCE}'s tenant: {tenant}")
+    if tenant is not None:
+        status, found = ui.post(
+            "/api/ops/search",
+            {"tenant_id": tenant, "query": "kelp forests", "k": 10, "filters": {"process_id": pid}},
+        )
+        hits = {r.get("article_id") for r in (found or {}).get("results", [])}
+        check(
+            status == 200 and bool(hits & set(articles)),
+            f"ops search in {tenant} finds a sample (got {status}: {sorted(hits)})",
+        )
+
+    if articles:
+        rerun(ui, articles[0])
+
+    status, preview = ui.post(
+        f"/api/ops/processes/{pid}/ingest", {"only_failed": True, "dry_run": True}
+    )
+    check(
+        status == 200 and (preview or {}).get("count") == 0,
+        f"dry-run re-run of the process's failures -> 200, count 0 (got {status}: {preview})",
+    )
+    status, preview = ui.post("/api/ops/dlq/redrive", {"max": 10, "dry_run": True})
+    check(status == 200, f"dry-run DLQ redrive -> 200 (got {status}: {preview})")
+
+    many = [f"art_{i}" for i in range(101)]
+    status, _ = ui.post("/api/ops/ingest", {"article_ids": many, "dry_run": True})
+    check(status == 422, f"ops ingest with 101 ids -> 422 (got {status})")
+    some = articles[:1] or ["art_x"]
+    status, _ = ui.post(
+        "/api/ops/ingest", {"article_ids": some, "from_stage": "CHUNK", "dry_run": True}
+    )
+    check(status == 422, f"ops ingest with from_stage -> 422 (got {status})")
+    status, _ = ui.post("/api/ops/reindex", {"dry_run": True})
+    check(status == 404, f"POST /api/ops/reindex -> 404 (got {status})")
+
+
+def rerun(ui: Ui, aid: str) -> None:
+    """A dry run queues nothing; the real (force) re-run reaches INDEXED with a new run."""
+    _, before = ui.get(f"/api/articles/{aid}/status")
+    first_run = _latest_run(before)
+
+    payload: dict[str, Any] = {"article_ids": [aid], "force": True, "dry_run": True}
+    status, preview = ui.post("/api/ops/ingest", payload)
+    check(
+        status == 200 and (preview or {}).get("count") == 1,
+        f"dry-run re-run of {aid} -> 200, count 1 (got {status}: {preview})",
+    )
+    _, after = ui.get(f"/api/articles/{aid}/status")
+    check(_latest_run(after) == first_run, "the dry run queued nothing (same latest run)")
+
+    status, queued = ui.post("/api/ops/ingest", {**payload, "dry_run": False})
+    check(
+        status == 202 and (queued or {}).get("count") == 1,
+        f"force re-run of {aid} -> 202 (got {status}: {queued})",
+    )
+    if status != 202:
+        return
+    deadline = time.monotonic() + RERUN_TIMEOUT
+    detail: Any = None
+    while time.monotonic() < deadline:
+        status, detail = ui.get(f"/api/articles/{aid}/status")
+        latest = (detail or {}).get("latest") or {}
+        if status == 200 and latest.get("status") == "INDEXED" and _latest_run(detail) != first_run:
+            break
+        time.sleep(10)
+    latest = (detail or {}).get("latest") or {}
+    check(
+        latest.get("status") == "INDEXED" and _latest_run(detail) not in {None, first_run},
+        f"re-run reached INDEXED with a new run ({first_run} -> {_latest_run(detail)})",
+    )
+
+
+def _latest_run(detail: Any) -> str | None:
+    runs = detail.get("runs") if isinstance(detail, dict) else None
+    return str(runs[0].get("run_id")) if runs else None
 
 
 def cleanup(env: str, articles: list[str]) -> None:
@@ -230,7 +328,9 @@ def main() -> int:
     ui = Ui(os.environ["UI_URL"], os.environ["UI_USER"], os.environ["UI_PASSWORD"])
     gate(ui, env)
     guards(ui)
-    articles = batch(ui)
+    pid, articles = batch(ui)
+    if pid is not None:
+        operations(ui, pid, articles)
     cleanup(env, articles)
     print(f"\n{len(failures)} failure(s)")
     return 1 if failures else 0

@@ -7,7 +7,7 @@ bruno/
   bruno.json, collection.bru        collection settings; AWS SigV4 auth inherited by every request
   environments/dev.bru, prod.bru    API URLs, AWS profile, allowOperations
   01 Producer API/                  create process → ticket → PUT to S3 → upload → articles → patch → close → delete; sources, uploads
-  02 Ingestion status/              article status, process summary, vector tables, process articles
+  02 Ingestion status/              article status, process summary, vector tables, process articles, ops overview, articles by status
   03 Ingestion operations/          re-run, redrive, reindex, rebuild, switch / roll back, retire a table
   04 Use cases/                     UC1, UC2, UC3, UC8, UC11 end to end; UC9 dry run
   05 Search/                        hybrid search for a tenant, filters, another tenant refused
@@ -29,6 +29,8 @@ bruno/
    Your principal needs the producer's `invoke_policy_arn`, plus the ingestion `control_api_reader_policy_arn` or `control_api_operator_policy_arn` (and `control_api_search_policy_arn` for 05 Search). It must also be a writer of the environment's `source` in the producer's `source_access`, and a reader of a source whose tenant is `tenantId` to search.
 
 No secrets are stored in the collection.
+
+`02 Ingestion status` also has **Ops overview** (`GET /v1/ops/overview`: in-progress and failed counts, queue depths) and **Articles by status** (`GET /v1/articles?status=FAILED_PERMANENT&limit=50`, paged with `next_token`).
 
 ## Use it
 

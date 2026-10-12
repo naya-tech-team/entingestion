@@ -60,7 +60,7 @@ done
 | Step | One stage of a run: Fetch, Extract, Normalize, Chunk, Embed, Validate, Index, Finalize (plus Claim, OCR and MarkFailed) |
 | LATEST | The current status item of an article |
 | Staging | The S3 bucket holding each step's output per article version |
-| Vector table | A pgvector table per embedding model and dimension, for example `chunks_titan2_1024` |
+| Vector table | A pgvector table per embedding model and dimension, for example `chunks_primary` |
 | `chunks_active` | The view that search reads. It points at the live vector table |
 | Lease | A 15-minute claim on an article by one run, so concurrent runs can't interleave |
 | Reconciler | An hourly Lambda that repairs what events missed; weekly it also checks for drift |

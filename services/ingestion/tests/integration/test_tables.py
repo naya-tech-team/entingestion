@@ -32,20 +32,20 @@ def test_ingest_ops_reads_status_and_switches_the_view(pg: Any) -> None:
     pg.execute("SET SESSION AUTHORIZATION ingest_ops")
 
     before = status(pg)
-    assert before["active_table"] == "chunks_titan2_1024"
-    assert before["tables"]["chunks_titan2_512"] == {
+    assert before["active_table"] == "chunks_primary"
+    assert before["tables"]["chunks_compact"] == {
         "rows": 0,
         "active_rows": 0,
         "active_articles": 0,
     }
 
-    out = activate(pg, "chunks_titan2_512")
-    assert out == {"previous": "chunks_titan2_1024", "active_table": "chunks_titan2_512"}
-    assert status(pg)["active_table"] == "chunks_titan2_512"
+    out = activate(pg, "chunks_compact")
+    assert out == {"previous": "chunks_primary", "active_table": "chunks_compact"}
+    assert status(pg)["active_table"] == "chunks_compact"
     assert view_owner(pg) == "ingest_views"  # the switch keeps the owner, so it can switch back
 
-    activate(pg, "chunks_titan2_1024")  # roll back
-    assert status(pg)["active_table"] == "chunks_titan2_1024"
+    activate(pg, "chunks_primary")  # roll back
+    assert status(pg)["active_table"] == "chunks_primary"
 
     # Readers still see the recreated view.
     pg.execute("RESET SESSION AUTHORIZATION")
@@ -57,9 +57,9 @@ def test_ingest_ops_reads_status_and_switches_the_view(pg: Any) -> None:
 @pytest.mark.parametrize(
     "statement",
     [
-        "TRUNCATE chunks_titan2_1024",
-        "DELETE FROM chunks_titan2_1024",
-        "DROP TABLE chunks_titan2_512",
+        "TRUNCATE chunks_primary",
+        "DELETE FROM chunks_primary",
+        "DROP TABLE chunks_compact",
         "DELETE FROM article_tombstones",
     ],
 )
@@ -92,7 +92,7 @@ def test_a_non_superuser_master_applies_every_migration(pg_url: str) -> None:
             assert "004" in apply(conn, MIGRATIONS)
             conn.autocommit = False
             assert view_owner(conn) == "ingest_views"
-            assert activate(conn, "chunks_titan2_512")["active_table"] == "chunks_titan2_512"
+            assert activate(conn, "chunks_compact")["active_table"] == "chunks_compact"
     finally:
         with psycopg.connect(pg_url, autocommit=True) as admin:
             admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')

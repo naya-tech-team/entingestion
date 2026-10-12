@@ -16,7 +16,7 @@ from tests.integration.test_tenants import as_role
 
 pytestmark = pytest.mark.integration
 
-TABLE = "chunks_titan2_1024"
+TABLE = "chunks_primary"
 DIM = 1024
 
 

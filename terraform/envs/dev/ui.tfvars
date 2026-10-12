@@ -1,9 +1,8 @@
 # ui stack, dev. Code: terraform/stacks/ui. Usage: make plan ENV=dev STACK=ui
 # First time: apply producer, then ingestion, then ui, then producer again (docs/UI.md).
 
-env            = "dev"
-region         = "us-west-2"
-aws_account_id = "106751264162"
+env    = "dev"
+region = "us-west-2"
 
 mandatory_tags = {
   created_by           = "naveen"

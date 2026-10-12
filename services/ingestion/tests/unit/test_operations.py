@@ -323,6 +323,116 @@ def test_unknown_routes(env: Env) -> None:
     assert api("GET", "/v1/nope")[0] == 404
 
 
+def put_latest(article_id: str, status: str, at: str, **fields: Any) -> None:
+    """A LATEST item in `status` since `at`, as the status store writes it."""
+    boto3.resource("dynamodb", region_name=REGION).Table("ingestion_status").put_item(
+        Item={"pk": article_id, "sk": keys.LATEST, "status": status, "gsi1pk": status,
+              "gsi1sk": at, "updated_at": at, "doc_version": 2, "process_id": "prc_A",
+              "tenant_id": "t1", **fields}
+    )  # fmt: skip
+
+
+def test_ops_overview(env: Env) -> None:
+    put_latest("art_a", "FAILED_PERMANENT", "2026-10-11T02:00:00.000Z", error_code="E_X")
+    put_latest("art_b", "FAILED_PERMANENT", "2026-10-11T01:00:00.000Z", error_code="E_X")
+    put_latest("art_c", "EMBEDDING", "2026-10-11T03:00:00.000Z")
+    put_latest("art_d", "INDEXED", "2026-10-11T00:00:00.000Z")
+    sqs = boto3.client("sqs", region_name=REGION)
+    sqs.send_message(QueueUrl=aws.get_settings().ingest_dlq_url, MessageBody="{}")
+    sqs.send_message(QueueUrl=aws.get_settings().ingest_queue_url, MessageBody="{}")
+    sqs.receive_message(QueueUrl=aws.get_settings().ingest_queue_url, VisibilityTimeout=60)
+
+    status, out = api("GET", "/v1/ops/overview")
+
+    assert status == 200
+    assert set(out) == {"statuses", "queues", "generated_at"}
+    assert set(out["statuses"]) == {
+        "CLAIMED", "FETCHING", "EXTRACTING", "NORMALIZING", "CHUNKING", "EMBEDDING", "VALIDATING",
+        "STAGED", "INDEXING", "FAILED_RETRYABLE", "FAILED_PERMANENT",
+    }  # fmt: skip
+    assert out["statuses"]["FAILED_PERMANENT"] == {
+        "count": 2,
+        "oldest_at": "2026-10-11T01:00:00.000Z",
+        "oldest_article_id": "art_b",
+    }
+    assert out["statuses"]["EMBEDDING"]["count"] == 1
+    assert out["statuses"]["CLAIMED"] == {"count": 0, "oldest_at": None, "oldest_article_id": None}
+    # The test environment has no backfill DLQ, so it's left out.
+    assert out["queues"] == {
+        "ingest": {"visible": 0, "in_flight": 1},
+        "ingest_dlq": {"visible": 1, "in_flight": 0},
+        "backfill": {"visible": 0, "in_flight": 0},
+    }
+
+
+def test_ops_overview_tolerates_an_unreadable_queue(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BACKFILL_DLQ_URL", f"https://sqs.{REGION}.amazonaws.com/123456789012/gone")
+    aws.get_settings.cache_clear()
+
+    status, out = api("GET", "/v1/ops/overview")
+
+    assert status == 200
+    assert out["queues"]["backfill_dlq"] == {"error": "unavailable"}
+    assert out["queues"]["ingest"] == {"visible": 0, "in_flight": 0}
+
+
+def test_articles_by_status_pages_oldest_first(env: Env) -> None:
+    for n in range(3):
+        put_latest(
+            f"art_{n}", "FAILED_PERMANENT", f"2026-10-11T0{3 - n}:00:00.000Z",
+            error_code="E_X", error_msg="boom", stage="EMBED",
+        )  # fmt: skip
+    put_latest("art_ok", "INDEXED", "2026-10-11T00:00:00.000Z")
+
+    status, out = api("GET", "/v1/articles?status=FAILED_PERMANENT&limit=2")
+
+    assert status == 200
+    assert [i["article_id"] for i in out["items"]] == ["art_2", "art_1"]
+    assert out["items"][0] == {
+        "article_id": "art_2", "status": "FAILED_PERMANENT", "stage": "EMBED",
+        "process_id": "prc_A", "tenant_id": "t1", "doc_version": 2, "error_code": "E_X",
+        "error_msg": "boom", "updated_at": "2026-10-11T01:00:00.000Z",
+    }  # fmt: skip
+    assert out["next_token"]
+
+    status, out = api(
+        "GET", f"/v1/articles?status=FAILED_PERMANENT&limit=2&next_token={out['next_token']}"
+    )
+    assert status == 200
+    assert [i["article_id"] for i in out["items"]] == ["art_0"]
+    assert out["next_token"] is None
+
+    status, out = api("GET", "/v1/articles?status=CLAIMED")  # default limit
+    assert (status, out) == (200, {"items": [], "next_token": None})
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["", "status=", "status=NOPE", "status=FAILED_PERMANENT&limit=0",
+     "status=FAILED_PERMANENT&limit=201", "status=FAILED_PERMANENT&limit=ten",
+     "status=FAILED_PERMANENT&next_token=%%%", "status=FAILED_PERMANENT&next_token=bm90IGpzb24",
+     "status=FAILED_PERMANENT&next_token=WzFd"],
+)  # fmt: skip
+def test_articles_by_status_rejects_bad_queries(env: Env, query: str) -> None:
+    status, out = api("GET", f"/v1/articles?{query}")
+    assert status == 422
+    assert out["errors"]
+
+
+def test_articles_by_status_limit_bounds_and_foreign_tokens(env: Env) -> None:
+    for n in range(2):
+        put_latest(f"art_{n}", "FAILED_RETRYABLE", f"2026-10-11T0{n}:00:00.000Z")
+    assert len(api("GET", "/v1/articles?status=FAILED_RETRYABLE&limit=1")[1]["items"]) == 1
+    assert len(api("GET", "/v1/articles?status=FAILED_RETRYABLE&limit=200")[1]["items"]) == 2
+
+    token = api("GET", "/v1/articles?status=FAILED_RETRYABLE&limit=1")[1]["next_token"]
+    status, out = api("GET", f"/v1/articles?status=FAILED_PERMANENT&next_token={token}")
+    assert status == 422
+    assert out["errors"][0]["msg"] == "next_token belongs to another status"
+
+
 # -- reconciler ------------------------------------------------------------------------------
 
 

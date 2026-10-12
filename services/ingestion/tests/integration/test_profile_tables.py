@@ -1,5 +1,5 @@
 """Vector tables from embedding profiles (ingest.vectorstore.profile_tables) on a real pgvector
-database: a 384-d profile's table has chunks_titan2_1024's structure, takes writes and serves
+database: a 384-d profile's table has chunks_primary's structure, takes writes and serves
 one tenant to ingest_reader, and ensure() is idempotent and refuses a changed dimension."""
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ TABLE = "chunks_mini_384"
 @pytest.fixture(autouse=True)
 def mini_profile(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     profiles = {
-        "titan2_1024": {"model": "amazon.titan-embed-text-v2:0", "dimension": 1024},
+        "primary": {"model": "amazon.titan-embed-text-v2:0", "dimension": 1024},
         "mini_384": {
             "provider": "openai_compatible",
             "model": "all-minilm",
@@ -83,13 +83,13 @@ def test_a_profile_table_has_the_original_tables_structure(pg: Any) -> None:
     assert ensure(pg, [MINI, *builtin_profiles().values()]) == [TABLE]
 
     assert dimension_of(pg, TABLE) == 384
-    template = columns(pg, "chunks_titan2_1024")
+    template = columns(pg, "chunks_primary")
     mine = columns(pg, TABLE)
     assert [c[0] for c in mine] == [c[0] for c in template]
     assert mine == template  # halfvec's size isn't in information_schema: checked above
-    assert indexes(pg, TABLE) == indexes(pg, "chunks_titan2_1024")
-    assert policies(pg, TABLE) == policies(pg, "chunks_titan2_1024")
-    assert grants(pg, TABLE) == grants(pg, "chunks_titan2_1024")
+    assert indexes(pg, TABLE) == indexes(pg, "chunks_primary")
+    assert policies(pg, TABLE) == policies(pg, "chunks_primary")
+    assert grants(pg, TABLE) == grants(pg, "chunks_primary")
 
     def constraints(table: str, kinds: str) -> list[tuple[str, str]]:
         return pg.execute(
@@ -98,8 +98,8 @@ def test_a_profile_table_has_the_original_tables_structure(pg: Any) -> None:
             (table, list(kinds)),
         ).fetchall()
 
-    # NOT NULLs (named constraints since PostgreSQL 18) as LIKE copies them, as for titan2_512.
-    not_null = sorted(d for _, d in constraints("chunks_titan2_1024", "n"))
+    # NOT NULLs (named constraints since PostgreSQL 18) as LIKE copies them, as for compact.
+    not_null = sorted(d for _, d in constraints("chunks_primary", "n"))
     assert sorted(d for _, d in constraints(TABLE, "n")) == not_null
     assert constraints(TABLE, "pc") == [
         ("chunks_mini_384_pkey", "PRIMARY KEY (chunk_id)"),
@@ -111,9 +111,9 @@ def test_a_profile_table_has_the_original_tables_structure(pg: Any) -> None:
         "SELECT profile, table_name, dimension, created FROM profile_tables ORDER BY profile"
     ).fetchall()
     assert recorded == [
+        ("compact", "chunks_compact", 512, False),
         ("mini_384", TABLE, 384, True),
-        ("titan2_1024", "chunks_titan2_1024", 1024, False),
-        ("titan2_512", "chunks_titan2_512", 512, False),
+        ("primary", "chunks_primary", 1024, False),
     ]
 
 
@@ -161,7 +161,7 @@ def test_a_changed_dimension_is_refused(pg: Any) -> None:
     ensure(pg, [MINI])
     with pytest.raises(ProfileTableError, match="384-d embeddings but profile mini_384 is 768-d"):
         ensure(pg, [replace(MINI, dimension=768)])
-    bad = replace(builtin_profiles()["titan2_1024"], dimension=512)
-    with pytest.raises(ProfileTableError, match="chunks_titan2_1024 has 1024-d"):
+    bad = replace(builtin_profiles()["primary"], dimension=512)
+    with pytest.raises(ProfileTableError, match="chunks_primary has 1024-d"):
         ensure(pg, [bad])
     assert dimension_of(pg, "chunks_nothing") is None

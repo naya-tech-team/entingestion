@@ -2,9 +2,8 @@
 # Plan only for now. Before a prod apply: a WAF web ACL, access logs and a custom domain with an
 # ACM certificate (docs/UI.md "Follow-ups"), and a login per person (Cognito) rather than one.
 
-env            = "prod"
-region         = "us-west-2"
-aws_account_id = "106751264162"
+env    = "prod"
+region = "us-west-2"
 
 mandatory_tags = {
   created_by           = "naveen"

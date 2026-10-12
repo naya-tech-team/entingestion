@@ -28,7 +28,7 @@ from tests.unit.test_pipeline import (
 )
 
 Env = tuple[FakeVectorStore, FakeTitan]
-NEW = "chunks_titan2_512"
+NEW = "chunks_compact"
 
 
 def indexed(article_id: str = "art_1", body: str = PAGE, **kw: Any) -> dict[str, Any]:
@@ -94,7 +94,7 @@ def test_rebuilding_the_old_table_after_a_model_change_still_works(env: Env) -> 
     run(reindex_message(record, StepName.EMBED, NEW))
     vectors.rows.clear()
 
-    _, outcome = run(reindex_message(record, StepName.INDEX, "chunks_titan2_1024"))
+    _, outcome = run(reindex_message(record, StepName.INDEX, "chunks_primary"))
 
     assert outcome["action"] == "DONE"  # its own staged vectors and manifest are intact
     assert vectors.active("art_1")
@@ -136,7 +136,7 @@ def test_edits_during_a_model_change_reach_both_tables(env: Env) -> None:
     assert {r["doc_version"] for r in vectors.active("art_1")} == {2}
     assert {r["doc_version"] for r in vectors.tables[NEW].active("art_1")} == {2}  # type: ignore[attr-defined]
     item = latest("art_1")
-    assert (item["tv_chunks_titan2_1024"], item[f"tv_{NEW}"]) == (2, 2)
+    assert (item["tv_chunks_primary"], item[f"tv_{NEW}"]) == (2, 2)
 
 
 def test_a_new_table_failing_does_not_fail_the_live_run(
@@ -290,7 +290,7 @@ def test_reindex_route(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
 
     status, out = api("POST", "/v1/reindex", {"from_stage": "INDEX"})
     assert status == 202
-    assert json.loads(sfn.started[1]["input"])["target_table"] == "chunks_titan2_1024"
+    assert json.loads(sfn.started[1]["input"])["target_table"] == "chunks_primary"
 
 
 @pytest.mark.parametrize(
@@ -306,7 +306,7 @@ class _TablesFake:
     def invoke(self, FunctionName: str, Payload: bytes) -> dict[str, Any]:
         event = json.loads(Payload)
         self.calls.append(event | {"function": FunctionName})
-        out = {"active_table": event.get("table", "chunks_titan2_1024")}
+        out = {"active_table": event.get("table", "chunks_primary")}
         return {"Payload": _Body(json.dumps(out).encode())}
 
 
@@ -320,7 +320,7 @@ def test_the_switch_is_gated_on_writes_and_coverage(
     record = indexed()
 
     status, body = api("GET", "/v1/tables")
-    assert (body["registry"]["live"], body["consistent"]) == ("chunks_titan2_1024", True)
+    assert (body["registry"]["live"], body["consistent"]) == ("chunks_primary", True)
     assert api("POST", "/v1/tables/active", {"table": "nope"})[0] == 422
 
     # Not written by live runs yet: refused.
@@ -333,18 +333,18 @@ def test_the_switch_is_gated_on_writes_and_coverage(
     run(reindex_message(record, StepName.EMBED, NEW))  # fill it
     status, body = api("POST", "/v1/tables/active", {"table": NEW})
     assert (status, body["gate"]) == (409, "evaluation")  # filled, but never evaluated
-    put_report("chunks_titan2_1024", 0.80)
+    put_report("chunks_primary", 0.80)
     put_report(NEW, 0.79)  # within the 0.02 tolerance
     status, body = api("POST", "/v1/tables/active", {"table": NEW})
     assert (status, body["active_table"], body["tables"]["live"]) == (200, NEW, NEW)
-    assert body["tables"]["writes"] == [NEW, "chunks_titan2_1024"]  # old table kept: exact rollback
+    assert body["tables"]["writes"] == [NEW, "chunks_primary"]  # old table kept: exact rollback
     assert [c["action"] for c in _TablesFake.calls] == ["status", "activate"]
     # Run as ingest_ops by the tables function, never by migrate (master credentials).
     assert {c["function"] for c in _TablesFake.calls} == {"ingestion-test-tables"}
 
     # The live table can't be retired; the old one can, after the switch.
     assert api("DELETE", f"/v1/tables/writes/{NEW}")[0] == 409
-    status, body = api("DELETE", "/v1/tables/writes/chunks_titan2_1024")
+    status, body = api("DELETE", "/v1/tables/writes/chunks_primary")
     assert (status, body["writes"]) == (200, [NEW])
 
 
@@ -370,7 +370,7 @@ def put_report(
         ([("live", 0.80, {}), ("new", 0.85, {"days": 8})], False, "8 days old"),
         ([("live", 0.80, {}), ("new", 0.85, {"golden": "_eval/golden/other.jsonl"})], False,
          "different golden sets"),
-        ([("new", 0.85, {})], False, "chunks_titan2_1024 has no evaluation"),
+        ([("new", 0.85, {})], False, "chunks_primary has no evaluation"),
         ([("live", 0.80, {"days": 30}), ("new", 0.785, {})], True, ""),  # live may be older
     ],
 )  # fmt: skip
@@ -386,7 +386,7 @@ def test_the_switch_is_gated_on_evaluation(
     monkeypatch.setattr(aws, "lambda_client", _TablesFake)
     registry.add_write(aws.status_store(), NEW, "test")  # no indexed articles: coverage is fine
     for which, recall, kw in reports:
-        put_report(NEW if which == "new" else "chunks_titan2_1024", recall, **kw)
+        put_report(NEW if which == "new" else "chunks_primary", recall, **kw)
 
     status, body = api("POST", "/v1/tables/active", {"table": NEW})
 
@@ -428,8 +428,8 @@ def test_active_table_is_read_from_the_view_definition() -> None:
 
         def fetchone(self) -> tuple[str]:
             return (
-                " SELECT chunks_titan2_512.chunk_id,\n    chunks_titan2_512.article_id\n"
-                "   FROM chunks_titan2_512\n  WHERE chunks_titan2_512.is_active;",
+                " SELECT chunks_compact.chunk_id,\n    chunks_compact.article_id\n"
+                "   FROM chunks_compact\n  WHERE chunks_compact.is_active;",
             )
 
     assert active_table(Conn()) == NEW  # type: ignore[arg-type]

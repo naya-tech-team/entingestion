@@ -170,7 +170,7 @@ GSIs (sparse):
 - Lifecycle: Finalize of a new version deletes the older versions' files, so they turn noncurrent; noncurrent versions move to Glacier IR after 30 days and expire after `staging_noncurrent_expiration_days` (90). The current version stays: it is the rebuild source. `_tmp/` and `_reindex/` expire. A delete removes every version of the article's files (and its embedding-cache entries) at once.
 
 **Vector tables:**
-- **One table per embedding profile** (model and dimension, [§8](#embedding-models)): `chunks_titan2_1024` (live) and `chunks_titan2_512` (migration 002); `migrate` creates the table of any other profile with the same structure.
+- **One table per embedding profile** (model and dimension, [§8](#embedding-models)): `chunks_primary` (live) and `chunks_compact` (migration 002); `migrate` creates the table of any other profile with the same structure.
 - **Columns:** `chunk_id` (sha256 of article, version and ordinal), `article_id`, `doc_version`, `ordinal`, `parent_id`, `parent_text`, `process_id`, `tenant_id` (NOT NULL, `default` when the producer row has none), `source`, `published_at` (date), `is_active`, `text`, `embed_text`, `heading_path`, `page_start`, `page_end`, `char_start`, `char_end`, `token_count`, `metadata`, `content_tsv` (generated: heading path weight A, text weight B), `embedding halfvec(N)`, `embedding_model`, `pipeline_version`, `created_at`.
 - **Indexes:**
   - HNSW (cosine) on the embedding;
@@ -245,13 +245,20 @@ Unknown exceptions are permanent, so there are no unbounded retries. psycopg err
 
 Every vector table is an **embedding profile**: a model and how to call it, in the table
 `chunks_<profile>`. Terraform's `embedding_profiles` reaches every function as JSON
-(`EMBEDDING_PROFILES`, parsed by `embedding/profiles.py`). The defaults are the two tables from
-before profiles, so names, staged files and cache keys stay as they were:
+(`EMBEDDING_PROFILES`, parsed by `embedding/profiles.py`). The defaults:
 
 | Profile | Provider | Model | Dimension | Table |
 |---|---|---|---|---|
-| `titan2_1024` (default) | `bedrock` | `amazon.titan-embed-text-v2:0` | 1024 | `chunks_titan2_1024` |
-| `titan2_512` | `bedrock` | `amazon.titan-embed-text-v2:0` | 512 | `chunks_titan2_512` |
+| `primary` (default) | `bedrock` | `amazon.titan-embed-text-v2:0` | 1024 | `chunks_primary` |
+| `compact` | `bedrock` | `amazon.titan-embed-text-v2:0` | 512 | `chunks_compact` |
+
+**Profile names say what a table is for, not which model fills it.** The model and dimension
+live in the profile, so a table name never goes stale, and `GET /v1/tables` reports both for
+every table. A table holds one model's vectors, though: pgvector fixes the dimension of the
+column and its index, and two models' vectors aren't comparable even at the same dimension. So
+a new model gets a new profile and table, filled by a reindex while the old one keeps serving,
+and then switched. Readers never name a table: search and evaluation follow the tenant's
+registry, and `chunks_active` is the default registry's live table.
 
 A profile has `provider`, `model`, `dimension` (1–4000, pgvector's HNSW limit for `halfvec`),
 `normalize` (default true), `batch_size` (16), `max_input_tokens` (8192) and, as needed,
@@ -270,7 +277,7 @@ An unknown Bedrock family is refused (Terraform validation, and at start-up). Th
 tfvars configure only Bedrock profiles; `openai_compatible` is there for later.
 
 **Tables from profiles.** After the numbered migrations, `migrate` creates the table of every
-profile that has none (`vectorstore/profile_tables.py`): `LIKE chunks_titan2_1024` (columns,
+profile that has none (`vectorstore/profile_tables.py`): `LIKE chunks_primary` (columns,
 defaults, NOT NULLs, the weighted `content_tsv`), `embedding halfvec(<dimension>)`, the primary
 key and `tenant_id <> ''` check, the same partial HNSW / GIN / article-version / tenant / source /
 published_at indexes, row-level security with the same three policies, and the same grants

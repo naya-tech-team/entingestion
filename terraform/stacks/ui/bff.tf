@@ -4,13 +4,20 @@
 locals {
   # The upstream routes the BFF may call, per API and method (its allow-list, docs/UI.md). In an
   # execute-api ARN, * also matches /, so these are as narrow as the paths allow. No DELETE or
-  # PATCH, no tables, no reindex.
+  # PATCH, no reindex and no table switch: model operations and deletes stay CLI-only.
   producer_routes = {
     GET  = ["/v1/sources", "/v1/processes", "/v1/processes/*", "/v1/processes/*/uploads"]
     POST = ["/v1/processes", "/v1/processes/*/close", "/v1/processes/*/uploads"]
   }
   control_routes = {
-    GET = ["/v1/processes/*/summary", "/v1/processes/*/articles", "/v1/articles/*/status"]
+    GET = [
+      "/v1/processes/*/summary", "/v1/processes/*/articles", "/v1/articles/*/status",
+      # Operations (read-only views): overview, articles by status, the table registry.
+      "/v1/ops/overview", "/v1/articles", "/v1/tables",
+    ]
+    # Operations actions: search, re-run articles or a process's failures, DLQ redrive. The BFF
+    # caps them (100 ids, no from_stage, max 200) before calling.
+    POST = ["/v1/search", "/v1/ingest", "/v1/processes/*/ingest", "/v1/dlq/redrive"]
   }
 
   # <execution arn>/<stage>/<METHOD>/<path>
@@ -29,7 +36,7 @@ data "aws_iam_policy_document" "bff" {
   }
 
   statement {
-    sid       = "InvokeControlApiReadOnly"
+    sid       = "InvokeControlApi"
     actions   = ["execute-api:Invoke"]
     resources = local.bff_invoke_arns.control
   }

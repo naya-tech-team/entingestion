@@ -1,7 +1,7 @@
 """Run the retrieval evaluation (chunk recall@5/@10, nDCG@10, MRR with 95% CIs) on a deployed
 environment.
 
-    uv run python scripts/evaluate.py [--env dev] [--table chunks_titan2_512] [--baseline]
+    uv run python scripts/evaluate.py [--env dev] [--table chunks_compact] [--baseline]
                                       [--min-recall10 0.6]
 
 Without --table it scores the live table (chunks_active); with one, a reindexed table before

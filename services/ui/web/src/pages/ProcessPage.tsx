@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api, ApiError, AuthError, query, seg } from "../api";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { ErrorBanner, Loading, Stat, StatusBadge, useInterval } from "../components/common";
 import { formatBytes, formatTime, shortPrincipal } from "../format";
+import { RERUN_WATCH_MS } from "../ops";
 import { POLL_MS, processFinished, processProgress } from "../status";
-import type { ArticleRow, Process, ProcessArticles, ProcessSummary, UploadPage, UploadRow } from "../types";
+import type { ActionResponse, ArticleRow, Process, ProcessArticles, ProcessSummary, UploadPage, UploadRow } from "../types";
 
 const UPLOAD_PAGE = 500;
 const MAX_UPLOAD_PAGES = 20;
@@ -83,7 +85,9 @@ export function ProcessPage() {
     };
   }, [load]);
 
-  const finished = processFinished(summary, process);
+  const [watchUntil, setWatchUntil] = useState(0);
+  // After a re-run, keep polling a while: the summary turns IN_PROGRESS once a run claims an article.
+  const finished = processFinished(summary, process) && watchUntil <= Date.now();
   const processMissing = errors.some(notFound) && !process;
   useInterval(() => void load(), finished || authLost || processMissing ? null : POLL_MS);
 
@@ -190,6 +194,25 @@ export function ProcessPage() {
                         ))}
                       </ul>
                     </>
+                  )}
+                  {summary.counts.failed > 0 && (
+                    <div className="actions">
+                      <ConfirmAction
+                        label="Re-run failed articles"
+                        title={`Re-run the failed articles of ${process.name || id}`}
+                        description={<p>Each failed article resumes after its last intact step.</p>}
+                        run={(dryRun) =>
+                          api.post<ActionResponse>(`/api/ops/processes/${seg(id)}/ingest`, {
+                            only_failed: true,
+                            dry_run: dryRun,
+                          })
+                        }
+                        onDone={() => {
+                          setWatchUntil(Date.now() + RERUN_WATCH_MS);
+                          void load();
+                        }}
+                      />
+                    </div>
                   )}
                 </>
               ) : (

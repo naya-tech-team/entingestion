@@ -164,18 +164,47 @@ Each article's ingestion status, for the articles the process last sent (an arti
 
 At most 1000 items, sorted by `article_id`. `status` is an ingestion status (RUNNING, STAGED, INDEXED, SKIPPED_*, FAILED_RETRYABLE, FAILED_PERMANENT, DELETED, …). An unknown process returns `200` with no items: its articles may not have reached ingestion yet.
 
+### `GET /v1/articles?status=<STATUS>&limit=1..200&next_token=`
+
+One page of the articles whose latest status is `status`, oldest first (by when they reached it; default `limit` 50):
+
+```json
+{"items": [{"article_id": "art_143e…", "status": "FAILED_PERMANENT", "stage": "EMBED",
+            "process_id": "prc_…", "tenant_id": "internal", "doc_version": 2,
+            "error_code": "E_UNREADABLE", "error_msg": "…", "updated_at": "…"}],
+ "next_token": "…" | null}
+```
+
+`status` is any ingestion status (CLAIMED … INDEXING, STAGED, INDEXED, SKIPPED, SKIPPED_UNCHANGED, FAILED_RETRYABLE, FAILED_PERMANENT, DELETED). Pass `next_token` back with the same `status` to get the next page; it's `null` on the last page, though a full page can end with a token whose next page is empty. A missing or unknown `status`, a `limit` outside 1..200, or a `next_token` that is garbled or from another status returns `422` (`{"message": "request validation failed", "errors": [{"loc": ["query", "status"], "msg": "…"}]}`).
+
+### `GET /v1/ops/overview`
+
+What's in flight or failed, and the queue depths:
+
+```json
+{"statuses": {"CLAIMED": {"count": 0, "oldest_at": null, "oldest_article_id": null},
+              "EMBEDDING": {"count": 3, "oldest_at": "2026-10-11T03:00:00.000Z", "oldest_article_id": "art_…"},
+              …,
+              "FAILED_PERMANENT": {"count": 2, "oldest_at": "…", "oldest_article_id": "art_…"}},
+ "queues": {"ingest": {"visible": 0, "in_flight": 1}, "ingest_dlq": {"visible": 1, "in_flight": 0},
+            "backfill": {"visible": 0, "in_flight": 0}, "backfill_dlq": {"error": "unavailable"}},
+ "generated_at": "2026-10-12T09:00:00.000Z"}
+```
+
+`statuses` always has CLAIMED, FETCHING, EXTRACTING, NORMALIZING, CHUNKING, EMBEDDING, VALIDATING, STAGED, INDEXING, FAILED_RETRYABLE and FAILED_PERMANENT. `oldest_at` is when the longest-waiting article reached the status; list them with `GET /v1/articles?status=`. The settled statuses (INDEXED, SKIPPED*, DELETED) are left out, since counting them means paging the whole table. `queues` gives each queue's approximate `visible` (waiting) and `in_flight` (received, not yet deleted) messages. A queue the function has no URL for is left out, and one it can't read shows `{"error": "unavailable"}` instead of failing the request.
+
 ### `GET /v1/tables?tenant_id=`
 
 ```json
-{"active_table": "chunks_titan2_1024",
- "tables": {"chunks_titan2_1024": {"rows": 139, "active_rows": 139, "active_articles": 27},
-            "chunks_titan2_512":  {"rows": 130, "active_rows": 130, "active_articles": 23}},
+{"active_table": "chunks_primary",
+ "tables": {"chunks_primary": {"rows": 139, "active_rows": 139, "active_articles": 27},
+            "chunks_compact":  {"rows": 130, "active_rows": 130, "active_articles": 23}},
  "tenant_id": null,
- "registry": {"live": "chunks_titan2_1024", "writes": ["chunks_titan2_1024"], "epoch": 3},
+ "registry": {"live": "chunks_primary", "writes": ["chunks_primary"], "epoch": 3},
  "consistent": true,
- "tenants": {"t-small": {"live": "chunks_titan2_512", "writes": ["chunks_titan2_512"], "epoch": 0,
+ "tenants": {"t-small": {"live": "chunks_compact", "writes": ["chunks_compact"], "epoch": 0,
                          "tenant_id": "t-small"}},
- "profiles": {"titan2_1024": {"table": "chunks_titan2_1024", "provider": "bedrock",
+ "profiles": {"primary": {"table": "chunks_primary", "provider": "bedrock",
                               "model": "amazon.titan-embed-text-v2:0", "dimension": 1024}, …}}
 ```
 
@@ -216,7 +245,7 @@ Returns `202` with `{"count", "tenant_id", "target_table", "from_stage", "tables
 
 ### `POST /v1/tables/active`: switch the live table
 
-The body is `{"table": "chunks_titan2_512", "tenant_id"?: "t-news", "force"?: false}`. Returns `200` with the new state (`active_table`, `previous`, `tenant_id`, `tables`). Switching back to the previous table is the rollback. Returns `422` for an unknown table.
+The body is `{"table": "chunks_compact", "tenant_id"?: "t-news", "force"?: false}`. Returns `200` with the new state (`active_table`, `previous`, `tenant_id`, `tables`). Switching back to the previous table is the rollback. Returns `422` for an unknown table.
 
 Without `tenant_id` the switch is the default registry's and also points `chunks_active` at the table (the tables function). With `tenant_id` it changes only that tenant's registry (a tenant without one gets its own, copied from the default registry), and the tenant's searches read the table directly.
 
@@ -243,7 +272,7 @@ Retires `table` from the (tenant's) registry: live runs stop writing it; its row
 The query is embedded with the tenant's live table's embedding profile (the tenant's own registry, else the default one; `table` in the response) and searched in that table; vector and keyword candidates (headings weigh more than text) are fused by reciprocal rank. Returns `200`:
 
 ```json
-{"tenant_id": "t-news", "query": "...", "k": 10, "table": "chunks_titan2_1024", "reranked": false,
+{"tenant_id": "t-news", "query": "...", "k": 10, "table": "chunks_primary", "reranked": false,
  "results": [{"chunk_id": "...", "article_id": "art_...", "doc_version": 2, "title": "...",
               "text": "...", "context": "...", "heading_path": ["..."], "page_start": 3, "page_end": 3,
               "char_start": 1200, "char_end": 2310, "source": "news", "published_at": "2026-09-30",

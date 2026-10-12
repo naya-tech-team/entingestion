@@ -16,7 +16,7 @@ variable "region" {
 }
 
 variable "aws_account_id" {
-  description = "Account this environment deploys to."
+  description = "Account this environment deploys to: TF_VAR_aws_account_id, which the Makefile sets from AWS_ACCOUNT_ID (never a tracked file). The provider refuses to run against any other."
   type        = string
 
   validation {
@@ -154,8 +154,8 @@ variable "embedding_profiles" {
     max_input_tokens    = optional(number, 8192)
   }))
   default = {
-    titan2_1024 = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-    titan2_512  = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
+    primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+    compact = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
   }
 
   validation {
@@ -204,7 +204,7 @@ variable "embedding_profiles" {
 variable "default_profile" {
   description = "The default registry's table before it has a registry item (tenants without their own registry): chunks_<default_profile>."
   type        = string
-  default     = "titan2_1024"
+  default     = "primary"
 
   validation {
     condition     = contains(keys(var.embedding_profiles), var.default_profile)

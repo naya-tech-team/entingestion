@@ -5,7 +5,7 @@ mock_provider "aws" {
     defaults = { partition = "aws" }
   }
   mock_data "aws_caller_identity" {
-    defaults = { account_id = "123456789012" }
+    defaults = { account_id = "123456789012", arn = "arn:aws:iam::123456789012:user/alice" }
   }
   mock_data "aws_iam_policy_document" {
     defaults = { json = "{}" }
@@ -65,6 +65,47 @@ variables {
   deploy_principal_arns = ["arn:aws:iam::123456789012:user/alice"]
 }
 
+run "deploy_principals_relative_to_the_account_get_its_arn" {
+  command = plan
+
+  variables {
+    deploy_principal_arns = ["user/alice", "arn:aws:iam::210987654321:role/ops"]
+  }
+
+  assert {
+    condition     = local.deploy_principals == ["arn:aws:iam::123456789012:user/alice", "arn:aws:iam::210987654321:role/ops"]
+    error_message = "Relative deploy principals get this account's ARN (aws_account_id); full ARNs are kept."
+  }
+}
+
+run "refuses_to_lock_the_applying_admin_out_of_the_state" {
+  command = plan
+
+  variables {
+    deploy_principal_arns = ["user/bob"] # alice is applying
+  }
+
+  expect_failures = [data.aws_iam_policy_document.state_access]
+}
+
+run "an_assumed_role_session_counts_as_its_role" {
+  command = plan
+
+  override_data {
+    target = data.aws_caller_identity.current
+    values = { account_id = "123456789012", arn = "arn:aws:sts::123456789012:assumed-role/admins/alice" }
+  }
+
+  variables {
+    deploy_principal_arns = ["role/admins"]
+  }
+
+  assert {
+    condition     = local.caller_principal == "arn:aws:iam::123456789012:role/admins"
+    error_message = "The guard compares the session's role ARN, as the bucket policy does."
+  }
+}
+
 run "one_deploy_role_per_environment" {
   command = plan
 
@@ -92,6 +133,11 @@ run "boundaries_fit_the_managed_policy_size_limit" {
 
   providers = {
     aws = aws.offline
+  }
+
+  override_data {
+    target = data.aws_caller_identity.current
+    values = { account_id = "123456789012", arn = "arn:aws:iam::123456789012:user/alice" }
   }
 
   override_module {

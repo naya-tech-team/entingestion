@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api, ApiError, AuthError, seg } from "../api";
+import { ConfirmAction } from "../components/ConfirmAction";
 import { ErrorBanner, Loading, Stat, StatusBadge, useInterval } from "../components/common";
 import { formatDuration, formatTime, metricsSummary } from "../format";
+import { RERUN_WATCH_MS } from "../ops";
 import { articleActive, orderSteps, POLL_MS } from "../status";
-import type { ArticleRun, ArticleStatus } from "../types";
+import type { ActionResponse, ArticleRun, ArticleStatus } from "../types";
 
 function runDuration(run: ArticleRun): string {
   if (!run.started_at || !run.ended_at) return "-";
@@ -23,6 +25,8 @@ export function ArticlePage() {
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
+  const [force, setForce] = useState(false);
+  const [watchUntil, setWatchUntil] = useState(0);
   const inFlight = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -63,7 +67,9 @@ export function ArticlePage() {
 
   // Keep refreshing while the article may still change, and while it hasn't arrived yet.
   const active = missing || (data !== null && articleActive(data.latest.status));
-  const stopped = error instanceof AuthError || (!active && data !== null);
+  // After a re-run, keep polling a while: the queued run takes a moment to claim the article.
+  const watching = watchUntil > Date.now();
+  const stopped = error instanceof AuthError || (!active && !watching && data !== null);
   useInterval(() => void load(), stopped ? null : POLL_MS);
 
   const latest = data?.latest;
@@ -131,6 +137,29 @@ export function ArticlePage() {
                 </a>
               </p>
             )}
+            <div className="actions rerun">
+              <ConfirmAction
+                label="Re-run this article"
+                title={`Re-run article ${id}`}
+                description={
+                  <p>
+                    The article resumes after its last intact step
+                    {force ? "; Force re-runs it even if its content is unchanged" : ""}.
+                  </p>
+                }
+                run={(dryRun) =>
+                  api.post<ActionResponse>("/api/ops/ingest", { article_ids: [id], force, dry_run: dryRun })
+                }
+                onDone={() => {
+                  setWatchUntil(Date.now() + RERUN_WATCH_MS);
+                  void load();
+                }}
+              />
+              <label className="checkbox">
+                <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+                Force
+              </label>
+            </div>
           </div>
 
           <h2>Steps</h2>

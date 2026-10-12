@@ -25,13 +25,13 @@ from tests.unit.test_quality import FakeLambda, backfill_queued
 from tests.unit.test_reindex import FakeSfn, _TablesFake, put_report, reindex_message
 
 Env = tuple[FakeVectorStore, FakeTitan]
-OLD, NEW = "chunks_titan2_1024", "chunks_titan2_512"
+OLD, NEW = "chunks_primary", "chunks_compact"
 
 
 @pytest.fixture
 def mapped(env: Env, monkeypatch: pytest.MonkeyPatch) -> Env:
     """Tenant t-small starts on the 512-d profile; every other tenant uses the default."""
-    monkeypatch.setenv("TENANT_PROFILES", json.dumps({"t-small": "titan2_512"}))
+    monkeypatch.setenv("TENANT_PROFILES", json.dumps({"t-small": "compact"}))
     aws.reset()
     return env
 
@@ -122,7 +122,7 @@ def test_an_article_moving_to_a_tenant_with_other_tables_is_reembedded(mapped: E
     run(message_from(produce("art_m", PAGE, tenant_id="t-other")))
     assert rows_of(mapped, OLD, "art_m")
 
-    # Same content, but now the tenant's registry writes chunks_titan2_512: a full run (not a
+    # Same content, but now the tenant's registry writes chunks_compact: a full run (not a
     # metadata update, which would only touch the old tables).
     _, out = run(
         message_from(
@@ -158,7 +158,7 @@ def test_tables_route_shows_a_tenants_registry(
     assert (status, body["registry"]["live"], body["consistent"]) == (200, OLD, True)
     assert body["tenants"] == {"t-small": {"live": NEW, "writes": [NEW], "epoch": 0,
                                            "tenant_id": "t-small"}}  # fmt: skip
-    assert body["profiles"]["titan2_512"] == {
+    assert body["profiles"]["compact"] == {
         "table": NEW,
         "provider": "bedrock",
         "model": "amazon.titan-embed-text-v2:0",

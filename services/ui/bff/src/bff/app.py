@@ -2,7 +2,14 @@
 
 It is the UI's "static user": every call goes to the producer or control API signed as this
 function's role. It exposes a fixed allow-list of routes, not a passthrough: no deletes,
-patches, reindexing or tables. Upstream status codes and JSON bodies are returned unchanged.
+patches, reindexing or table changes. Upstream status codes and JSON bodies are returned
+unchanged.
+
+The Operations routes (/api/ops/*) add read-only views (overview, articles by status, the
+table registry, search) and three actions: re-run articles, re-run a process's failures and
+redrive the DLQ. The BFF caps the actions beyond the control API's own validation (at most
+100 article ids, no from_stage, a redrive max of at most 200) and logs each one's route,
+dry_run and count, never its body.
 
 Browsers resend cached basic-auth credentials on cross-site requests, so every POST must carry
 X-Requested-With (which a cross-site form can't set without a CORS preflight that nothing
@@ -16,6 +23,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qsl
 
@@ -36,6 +44,12 @@ ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 CSRF_HEADER = "x-requested-with"
 CSRF_VALUE = "entingestion-ui"
 IDEMPOTENCY_HEADER = "idempotency-key"
+
+# Operations guard rails (docs/UI.md "Operations").
+MAX_RERUN_IDS = 100
+MAX_REDRIVE = 200
+
+Errors = list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
@@ -93,16 +107,130 @@ def article_status(article_id: str) -> Response[str]:
     return _forward("GET", CONTROL, "/v1/articles/{}/status", article_id)
 
 
+# -- Operations ---------------------------------------------------------------------------
+
+
+@app.get("/api/ops/overview")
+def ops_overview() -> Response[str]:
+    return _forward("GET", CONTROL, "/v1/ops/overview")
+
+
+@app.get("/api/ops/articles")
+def ops_articles() -> Response[str]:
+    return _forward("GET", CONTROL, "/v1/articles", query=True)
+
+
+@app.get("/api/ops/tables")
+def ops_tables() -> Response[str]:
+    return _forward("GET", CONTROL, "/v1/tables", query=True)
+
+
+@app.post("/api/ops/search")
+def ops_search() -> Response[str]:
+    return _forward("POST", CONTROL, "/v1/search")
+
+
+@app.post("/api/ops/ingest")
+def ops_ingest() -> Response[str]:
+    return _ops_action("/v1/ingest", check=_check_rerun)
+
+
+@app.post("/api/ops/processes/<process_id>/ingest")
+def ops_process_ingest(process_id: str) -> Response[str]:
+    return _ops_action("/v1/processes/{}/ingest", process_id)
+
+
+@app.post("/api/ops/dlq/redrive")
+def ops_redrive() -> Response[str]:
+    return _ops_action("/v1/dlq/redrive", check=_check_redrive)
+
+
+def _check_rerun(body: dict[str, Any]) -> Errors:
+    errors: Errors = []
+    ids = body.get("article_ids")
+    if isinstance(ids, list) and len(ids) > MAX_RERUN_IDS:
+        errors.append(
+            {
+                "loc": ["body", "article_ids"],
+                "msg": f"at most {MAX_RERUN_IDS} article ids from the UI",
+            }
+        )
+    if "from_stage" in body:
+        errors.append(
+            {
+                "loc": ["body", "from_stage"],
+                "msg": "not allowed from the UI: re-runs start from the beginning",
+            }
+        )
+    return errors
+
+
+def _check_redrive(body: dict[str, Any]) -> Errors:
+    value = body.get("max")
+    if "max" in body and (
+        not isinstance(value, int) or isinstance(value, bool) or value > MAX_REDRIVE
+    ):
+        return [{"loc": ["body", "max"], "msg": f"an integer of at most {MAX_REDRIVE} from the UI"}]
+    return []
+
+
+def _ops_action(
+    template: str, *ids: str, check: Callable[[dict[str, Any]], Errors] | None = None
+) -> Response[str]:
+    """A control-API action: guarded like any POST, then the body is checked against the UI's
+    caps before it's forwarded byte for byte. Logs route, dry_run and count, not the body."""
+    rejected = _rejected("POST", ids)
+    if rejected is not None:
+        return rejected
+    try:
+        raw = _body_bytes().decode("utf-8")
+        body = json.loads(raw) if raw.strip() else {}
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError
+        return _json(400, {"message": "invalid JSON"})
+    if not isinstance(body, dict):
+        return _invalid([{"loc": ["body"], "msg": "must be a JSON object"}])
+    errors = check(body) if check else []
+    if errors:
+        return _invalid(errors)
+
+    response = _forward("POST", CONTROL, template, *ids)
+    ids_in_body = body.get("article_ids")
+    logger.info(
+        "ops action",
+        extra={
+            "route": template,
+            "path_ids": list(ids),
+            "dry_run": body.get("dry_run") is True,
+            "count": len(ids_in_body) if isinstance(ids_in_body, list) else None,
+            "status": response.status_code,
+        },
+    )
+    return response
+
+
+def _invalid(errors: Errors) -> Response[str]:
+    """422 in the shape the APIs use for request validation."""
+    return _json(422, {"message": "request validation failed", "errors": errors})
+
+
 # ---------------------------------------------------------------------------
 # Forwarding
 # ---------------------------------------------------------------------------
 
 
-def _forward(method: str, api: str, template: str, *ids: str, query: bool = False) -> Response[str]:
+def _rejected(method: str, ids: tuple[str, ...]) -> Response[str] | None:
+    """The CSRF guard on POSTs, then the path ids; None when the request may go on."""
     if method == "POST" and not _passes_csrf_guard():
         return _json(403, {"message": "forbidden"})
     if not all(ID_PATTERN.fullmatch(i) for i in ids):
         return _json(400, {"message": "invalid id"})
+    return None
+
+
+def _forward(method: str, api: str, template: str, *ids: str, query: bool = False) -> Response[str]:
+    rejected = _rejected(method, ids)
+    if rejected is not None:
+        return rejected
 
     headers: dict[str, str] = {}
     body: bytes | None = None

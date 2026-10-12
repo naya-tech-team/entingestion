@@ -1,5 +1,4 @@
-region         = "us-west-2"
-aws_account_id = "106751264162"
+region = "us-east-1"
 
 mandatory_tags = {
   created_by           = "naveen"
@@ -11,5 +10,5 @@ mandatory_tags = {
   division             = "TBD" # placeholder: replace with the real value
 }
 
-# People who may assume the deploy roles (and use the state bucket as break-glass).
-deploy_principal_arns = ["arn:aws:iam::106751264162:user/bedrock-role"]
+# The people who may assume the deploy roles come from the environment, not this file:
+#   export TF_VAR_deploy_principal_arns='["user/<you>"]'

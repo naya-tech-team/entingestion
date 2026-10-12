@@ -19,6 +19,14 @@ locals {
   partition        = data.aws_partition.current.partition
   iam_arn          = "arn:${local.partition}:iam::${var.aws_account_id}"
 
+  # deploy_principal_arns may be relative to the account ("user/<name>"); derive the full ARN.
+  deploy_principals = [for p in var.deploy_principal_arns : startswith(p, "arn:") ? p : "${local.iam_arn}:${p}"]
+
+  # Who is applying, as the principal the state-bucket policy sees (an assumed-role session
+  # counts as its role).
+  caller_principal = replace(data.aws_caller_identity.current.arn,
+  "/^arn:([^:]+):sts::([0-9]{12}):assumed-role/([^/]+)/.*$/", "arn:$1:iam::$2:role/$3")
+
   # Computed rather than referenced, so the deploy boundary doesn't wait on the policy resource.
   workload_boundary_arns = { for env in var.environments : env => "${local.iam_arn}:policy/entingestion-${env}-workload-boundary" }
   other_envs             = { for env in var.environments : env => sort(tolist(setsubtract(var.environments, [env]))) }
@@ -53,6 +61,8 @@ locals {
 
 data "aws_partition" "current" {}
 
+data "aws_caller_identity" "current" {}
+
 resource "aws_iam_openid_connect_provider" "github" {
   count = var.github_repository == null ? 0 : 1
 
@@ -69,7 +79,7 @@ data "aws_iam_policy_document" "deploy_trust" {
 
     principals {
       type        = "AWS"
-      identifiers = var.deploy_principal_arns
+      identifiers = local.deploy_principals
     }
 
     dynamic "condition" {
@@ -475,6 +485,16 @@ resource "aws_iam_policy" "workload_boundary" {
 
 # The state bucket: only the deploy roles and the listed people (break-glass) may use it.
 data "aws_iam_policy_document" "state_access" {
+  # The policy denies the state bucket to everyone else, the admin applying it included: one who
+  # isn't in deploy_principal_arns would lock themselves out of the bucket (only root, or a role
+  # with a deploy role's name, could remove the policy again).
+  lifecycle {
+    precondition {
+      condition     = contains(concat(local.deploy_principals, values(local.deploy_role_arns)), local.caller_principal) || endswith(local.caller_principal, ":root")
+      error_message = "You (${local.caller_principal}) aren't in deploy_principal_arns: the state bucket policy would lock you out. Add yourself, e.g. TF_VAR_deploy_principal_arns='[\"user/<you>\"]'."
+    }
+  }
+
   statement {
     sid       = "OnlyDeployRolesAndAdmins"
     effect    = "Deny"
@@ -491,7 +511,7 @@ data "aws_iam_policy_document" "state_access" {
       variable = "aws:PrincipalArn"
       values = concat(
         values(local.deploy_role_arns),
-        var.deploy_principal_arns,
+        local.deploy_principals,
         ["arn:${local.partition}:iam::${var.aws_account_id}:root"],
       )
     }

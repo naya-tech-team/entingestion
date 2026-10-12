@@ -1,9 +1,9 @@
 -- 007: vector tables from embedding profiles (ingest.vectorstore.profile_tables).
 --
 -- After the numbered migrations, the migrate function creates chunks_<profile> for every
--- configured embedding profile that has no table yet, shaped exactly like chunks_titan2_1024
+-- configured embedding profile that has no table yet, shaped exactly like chunks_primary
 -- (after 001-006) with its own embedding dimension, and records it here. Tables that existed
--- before (chunks_titan2_1024, chunks_titan2_512) are recorded the first time they're checked.
+-- before (chunks_primary, chunks_compact) are recorded the first time they're checked.
 
 CREATE TABLE profile_tables (
   profile    text PRIMARY KEY,

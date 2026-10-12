@@ -142,3 +142,146 @@ export interface ArticleStatus {
   steps: ArticleStep[];
   execution: string | null;
 }
+
+// --- Operations (/api/ops/*) ---
+
+export interface OpsStatusInfo {
+  count: number;
+  oldest_at: string | null;
+  oldest_article_id: string | null;
+}
+
+export interface OpsQueueDepth {
+  visible: number;
+  in_flight: number;
+}
+
+export type OpsQueue = OpsQueueDepth | { error: string };
+
+export interface OpsOverview {
+  statuses: Record<string, OpsStatusInfo>;
+  queues: Record<string, OpsQueue>;
+  generated_at: string;
+}
+
+export interface OpsArticle {
+  article_id: string;
+  status: string;
+  stage?: string | null;
+  process_id?: string | null;
+  tenant_id?: string | null;
+  doc_version?: number | null;
+  error_code?: string | null;
+  error_msg?: string | null;
+  updated_at?: string | null;
+}
+
+export interface OpsArticlePage {
+  items: OpsArticle[];
+  next_token: string | null;
+}
+
+export interface RegistryState {
+  live?: string | null;
+  writes?: string[] | null;
+  epoch?: number | null;
+  tenant_id?: string | null;
+}
+
+export interface TableStats {
+  rows?: number | null;
+  active_rows?: number | null;
+  active_articles?: number | null;
+}
+
+export interface EmbeddingProfile {
+  table?: string;
+  provider?: string;
+  model?: string;
+  dimension?: number;
+}
+
+/** GET /api/ops/tables (the control API's GET /v1/tables). Every field is optional: render defensively. */
+export interface TablesResponse {
+  active_table?: string | null;
+  tables?: Record<string, TableStats | null> | null;
+  tenant_id?: string | null;
+  registry?: RegistryState | null;
+  consistent?: boolean | null;
+  tenants?: Record<string, RegistryState> | null;
+  profiles?: Record<string, EmbeddingProfile> | null;
+}
+
+export interface SearchFilters {
+  source?: string;
+  published_after?: string;
+  process_id?: string;
+}
+
+export interface SearchRequest {
+  tenant_id: string;
+  query: string;
+  k: number;
+  filters?: SearchFilters;
+}
+
+export interface SearchResult {
+  chunk_id: string;
+  article_id: string;
+  doc_version?: number | null;
+  title?: string | null;
+  text?: string | null;
+  context?: string | null;
+  heading_path?: string[] | null;
+  page_start?: number | null;
+  page_end?: number | null;
+  char_start?: number | null;
+  char_end?: number | null;
+  source?: string | null;
+  published_at?: string | null;
+  score?: number | null;
+  vector_rank?: number | null;
+  keyword_rank?: number | null;
+}
+
+export interface SearchResponse {
+  tenant_id: string;
+  query: string;
+  k: number;
+  table?: string | null;
+  reranked?: boolean;
+  results: SearchResult[];
+}
+
+/** One ingest message of a dry run (the control API's IngestMessage). */
+export interface IngestMessagePreview {
+  article_id: string;
+  process_id?: string | null;
+  event?: string;
+  trigger?: string;
+  force?: boolean;
+  [key: string]: unknown;
+}
+
+export interface DlqMove {
+  messages: number;
+  moved: boolean;
+  task_handle?: string;
+}
+
+/**
+ * POST /api/ops/ingest, /api/ops/processes/{id}/ingest and /api/ops/dlq/redrive.
+ * A dry run lists `messages`; a real call reports `queued`. Ids with no ingestion record are in
+ * `not_found` (older docs call it `missing`).
+ */
+export interface ActionResponse {
+  dry_run: boolean;
+  count: number;
+  messages?: IngestMessagePreview[];
+  queued?: number;
+  not_found?: string[];
+  missing?: string[];
+  process_id?: string;
+  error_code?: string | null;
+  dlq?: DlqMove | null;
+}

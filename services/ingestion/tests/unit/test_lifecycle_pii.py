@@ -69,7 +69,7 @@ def test_a_delete_purges_staging_and_the_embedding_cache(env: Env) -> None:
         .decode()
         .splitlines()
     ]
-    live_key = TARGETS["chunks_titan2_1024"].cache_key(chunks[-1]["embed_text"])
+    live_key = TARGETS["chunks_primary"].cache_key(chunks[-1]["embed_text"])
     cache = aws.table(aws.get_settings().cache_table)
     assert "Item" in cache.get_item(Key={"cache_key": live_key})
 

@@ -350,10 +350,11 @@ run "operations_functions_are_wired" {
   assert {
     condition = (
       module.fn["control_api"].settings.environment.INGEST_QUEUE_URL != null
+      && module.fn["control_api"].settings.environment.BACKFILL_DLQ_URL != null
       && module.fn["reconciler"].settings.environment.ALERT_TOPIC_ARN != null
       && module.fn["reconciler"].settings.environment.RECONCILE_BATCH == "500"
     )
-    error_message = "Control API and reconciler need the ingest queue; the reconciler also the alert topic."
+    error_message = "Control API and reconciler need the ingest queue (the control API also the backfill DLQ, for its overview); the reconciler also the alert topic."
   }
 
   assert {
@@ -390,6 +391,16 @@ run "operations_functions_are_wired" {
       )
     ])
     error_message = "The control API writes only the #CONFIG items (the vector-table registry)."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in data.aws_iam_policy_document.control_api.statement :
+      s.sid == "BackfillQueueDepths"
+      && tolist(s.actions) == tolist(["sqs:GetQueueAttributes"])
+      && toset(s.resources) == toset([module.backfill_queue.queue_arn, module.backfill_queue.dlq_arn])
+    ])
+    error_message = "The control API reads the backfill queue's and backfill DLQ's depths (GET /v1/ops/overview), nothing more."
   }
 }
 
@@ -1138,13 +1149,13 @@ run "default_embedding_profiles_reproduce_the_original_tables" {
   assert {
     condition = (
       jsondecode(module.fn["embed"].settings.environment.EMBEDDING_PROFILES) == {
-        titan2_1024 = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024, normalize = true, batch_size = 16, max_input_tokens = 8192 }
-        titan2_512  = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512, normalize = true, batch_size = 16, max_input_tokens = 8192 }
+        primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024, normalize = true, batch_size = 16, max_input_tokens = 8192 }
+        compact = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512, normalize = true, batch_size = 16, max_input_tokens = 8192 }
       }
-      && module.fn["embed"].settings.environment.DEFAULT_PROFILE == "titan2_1024"
+      && module.fn["embed"].settings.environment.DEFAULT_PROFILE == "primary"
       && module.fn["embed"].settings.environment.TENANT_PROFILES == "{}"
     )
-    error_message = "By default the profiles are the two Titan tables, chunks_titan2_1024 live (numbers and booleans as JSON)."
+    error_message = "By default the profiles are the two Titan tables, chunks_primary live (numbers and booleans as JSON)."
   }
 
   assert {
@@ -1176,8 +1187,8 @@ run "embedding_profiles_for_cohere_and_an_openai_compatible_endpoint" {
 
   variables {
     embedding_profiles = {
-      titan2_1024 = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-      cohere_m3   = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
+      primary      = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+      multilingual = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
       lite_768 = {
         provider       = "openai_compatible"
         model          = "nomic-embed-text"
@@ -1186,7 +1197,7 @@ run "embedding_profiles_for_cohere_and_an_openai_compatible_endpoint" {
         api_key_secret = "entingestion/dev/litellm"
       }
     }
-    tenant_profiles = { "t-multi" = "cohere_m3" }
+    tenant_profiles = { "t-multi" = "multilingual" }
   }
 
   assert {
@@ -1196,7 +1207,7 @@ run "embedding_profiles_for_cohere_and_an_openai_compatible_endpoint" {
         batch_size     = 16, max_input_tokens = 8192, base_url = "https://litellm.example.com/v1",
         api_key_secret = "entingestion/dev/litellm"
       }
-      && jsondecode(module.fn["embed"].settings.environment.TENANT_PROFILES) == { "t-multi" = "cohere_m3" }
+      && jsondecode(module.fn["embed"].settings.environment.TENANT_PROFILES) == { "t-multi" = "multilingual" }
     )
     error_message = "Profiles and the tenant mapping reach the functions as JSON."
   }
@@ -1233,9 +1244,9 @@ run "an_openai_compatible_profile_needs_an_https_base_url" {
   command = plan
   variables {
     embedding_profiles = {
-      titan2_1024 = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-      plain       = { provider = "openai_compatible", model = "m", dimension = 384, base_url = "http://emb.example.com" }
-      missing     = { provider = "openai_compatible", model = "m", dimension = 384 }
+      primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+      plain   = { provider = "openai_compatible", model = "m", dimension = 384, base_url = "http://emb.example.com" }
+      missing = { provider = "openai_compatible", model = "m", dimension = 384 }
     }
   }
   expect_failures = [var.embedding_profiles]
@@ -1245,8 +1256,8 @@ run "an_embedding_dimension_must_fit_hnsw" {
   command = plan
   variables {
     embedding_profiles = {
-      titan2_1024 = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-      huge        = { provider = "openai_compatible", model = "m", dimension = 4096, base_url = "http://localhost:4000" }
+      primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+      huge    = { provider = "openai_compatible", model = "m", dimension = 4096, base_url = "http://localhost:4000" }
     }
   }
   expect_failures = [var.embedding_profiles]
@@ -1256,8 +1267,8 @@ run "an_unknown_bedrock_model_family_is_refused" {
   command = plan
   variables {
     embedding_profiles = {
-      titan2_1024 = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-      image       = { provider = "bedrock", model = "amazon.titan-embed-image-v1", dimension = 1024 }
+      primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+      image   = { provider = "bedrock", model = "amazon.titan-embed-image-v1", dimension = 1024 }
     }
   }
   expect_failures = [var.embedding_profiles]

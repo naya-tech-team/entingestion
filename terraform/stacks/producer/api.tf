@@ -1,8 +1,20 @@
 # API: API Gateway (REST, AWS_IAM) -> api Lambda (brief §4, §7.3).
 
 locals {
+  # Principals in tfvars are relative to this account ("role/<name>", "user/<name>", patterns
+  # allowed); the full ARN is derived from the account id. A full ARN passes through unchanged.
+  # operator_principals (from the environment) write every source.
+  iam_arn_prefix = "arn:${local.partition}:iam::${var.aws_account_id}:"
+  source_access = {
+    for name, cfg in var.source_access : name => merge(cfg, {
+      writers = [for p in distinct(concat(cfg.writers, var.operator_principals)) : startswith(p, "arn:") ? p : "${local.iam_arn_prefix}${p}"]
+      readers = [for p in cfg.readers : startswith(p, "arn:") ? p : "${local.iam_arn_prefix}${p}"]
+    })
+  }
+  admin_principals = [for p in var.admin_principals : startswith(p, "arn:") ? p : "${local.iam_arn_prefix}${p}"]
+
   # Per-source writers/readers and tenants (producer.authz); also published for ingestion.
-  source_access_json = jsonencode({ sources = var.source_access, admins = var.admin_principals })
+  source_access_json = jsonencode({ sources = local.source_access, admins = local.admin_principals })
 
   # Shared by the api and registrar functions.
   function_environment = merge(

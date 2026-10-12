@@ -69,7 +69,7 @@ def test_a_reader_of_a_source_searches_its_tenant(searching: FakeLambda) -> None
     )
 
     assert status == 200
-    assert (out["tenant_id"], out["table"], out["reranked"]) == ("t-news", "chunks_titan2_1024",
+    assert (out["tenant_id"], out["table"], out["reranked"]) == ("t-news", "chunks_primary",
                                                                    False)  # fmt: skip
     assert [h["chunk_id"] for h in out["results"]] == ["0", "1", "2"]
     [call] = searching.calls

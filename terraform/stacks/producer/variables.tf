@@ -6,7 +6,7 @@ variable "region" {
 }
 
 variable "aws_account_id" {
-  description = "Account this environment deploys to. The provider refuses to run against any other."
+  description = "Account this environment deploys to: TF_VAR_aws_account_id, which the Makefile sets from AWS_ACCOUNT_ID (never a tracked file). The provider refuses to run against any other, and ARNs are derived from it."
   type        = string
 
   validation {
@@ -252,8 +252,9 @@ variable "api_reserved_concurrency" {
 variable "source_access" {
   description = <<-EOT
     Which principals may write and read each source, and the tenant its articles belong to
-    (producer.authz). Patterns are shell-style and match the caller ARN or, for an assumed
-    role, the role ARN. A source missing here can't be used; an empty map allows nothing.
+    (producer.authz). Principals are relative to this account ("role/<name>", "user/<name>"),
+    and the stack derives the ARN from aws_account_id; a full ARN (another account) is kept as is.
+    Patterns are shell-style and match the caller ARN or, for an assumed role, the role ARN. A source missing here can't be used; an empty map allows nothing.
     Readers and writers of a source may also search its tenant (ingestion POST /v1/search).
     pii: what ingestion does with PII it finds when its pii_screening is on: block (don't
     index), redact (replace with [TYPE]) or allow (the default; record it).
@@ -285,16 +286,41 @@ variable "source_access" {
   }
 
   validation {
+    condition = alltrue(flatten([
+      for cfg in values(var.source_access) : [
+        for p in concat(cfg.writers, cfg.readers) : can(regex("^((user|role)/|arn:)", p))
+      ]
+    ]))
+    error_message = "Each writer and reader is \"role/<name>\" or \"user/<name>\" in this account, or a full ARN."
+  }
+
+  validation {
     # Lambda environment variables share a 4 KB budget.
     condition     = length(jsonencode(var.source_access)) <= 2500
     error_message = "source_access is too large for a Lambda environment variable; use patterns."
   }
 }
 
-variable "admin_principals" {
-  description = "Principals (ARN patterns) that may read and change every source, e.g. the deploy role."
+variable "operator_principals" {
+  description = "People who write every source (Bruno, the CLI, acceptance scripts): \"user/<name>\" or \"role/<name>\" in this account, or a full ARN. From the environment, never a tracked file: OPERATOR_PRINCIPALS=user/<you> for make (TF_VAR_operator_principals)."
   type        = list(string)
   default     = []
+
+  validation {
+    condition     = alltrue([for p in var.operator_principals : can(regex("^((user|role)/|arn:)", p))])
+    error_message = "Each operator principal is \"role/<name>\" or \"user/<name>\" in this account, or a full ARN."
+  }
+}
+
+variable "admin_principals" {
+  description = "Principals that may read and change every source, e.g. \"role/entingestion-dev-deploy\": relative to this account (the ARN is derived from aws_account_id) or a full ARN. Patterns allowed."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for p in var.admin_principals : can(regex("^((user|role)/|arn:)", p))])
+    error_message = "Each admin principal is \"role/<name>\" or \"user/<name>\" in this account, or a full ARN."
+  }
 }
 
 # -- Lifecycle (review M2.2) -------------------------------------------------------

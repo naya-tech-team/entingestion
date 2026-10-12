@@ -1,6 +1,12 @@
 import type { MouseEvent } from "react";
 import { HashRouter, Link, NavLink, Route, Routes } from "react-router";
 import { ArticlePage } from "./pages/ArticlePage";
+import { DlqPage } from "./pages/ops/DlqPage";
+import { FailedPage } from "./pages/ops/FailedPage";
+import { OpsLayout } from "./pages/ops/OpsLayout";
+import { OverviewPage } from "./pages/ops/OverviewPage";
+import { SearchPage } from "./pages/ops/SearchPage";
+import { TablesPage } from "./pages/ops/TablesPage";
 import { ProcessesPage } from "./pages/ProcessesPage";
 import { ProcessPage } from "./pages/ProcessPage";
 import { UploadPage } from "./pages/UploadPage";
@@ -32,6 +38,7 @@ export function App() {
               Upload
             </NavLink>
             <NavLink to="/processes">Processes</NavLink>
+            <NavLink to="/ops">Operations</NavLink>
           </nav>
         </div>
       </header>
@@ -41,6 +48,13 @@ export function App() {
           <Route path="/processes" element={<ProcessesPage />} />
           <Route path="/processes/:id" element={<ProcessPage />} />
           <Route path="/articles/:id" element={<ArticlePage />} />
+          <Route path="/ops" element={<OpsLayout />}>
+            <Route index element={<OverviewPage />} />
+            <Route path="articles" element={<FailedPage />} />
+            <Route path="dlq" element={<DlqPage />} />
+            <Route path="search" element={<SearchPage />} />
+            <Route path="tables" element={<TablesPage />} />
+          </Route>
           <Route path="*" element={<NotFound />} />
         </Routes>
       </main>

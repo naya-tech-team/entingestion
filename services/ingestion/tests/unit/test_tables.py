@@ -27,7 +27,7 @@ class RecordingConn:
         return self
 
     def fetchone(self) -> tuple[str]:
-        return (" SELECT chunk_id\n   FROM chunks_titan2_1024\n  WHERE is_active;",)
+        return (" SELECT chunk_id\n   FROM chunks_primary\n  WHERE is_active;",)
 
     def fetchall(self) -> list[Any]:
         return []
@@ -53,13 +53,13 @@ def fresh_settings() -> Iterator[None]:
 def test_activate_switches_the_view_as_its_owner() -> None:
     conn = RecordingConn()
 
-    out = migrate.activate(conn, "chunks_titan2_512")  # type: ignore[arg-type]
+    out = migrate.activate(conn, "chunks_compact")  # type: ignore[arg-type]
 
-    assert out == {"previous": "chunks_titan2_1024", "active_table": "chunks_titan2_512"}
+    assert out == {"previous": "chunks_primary", "active_table": "chunks_compact"}
     switch = conn.sql[1:]
     assert switch[0] == 'SET LOCAL ROLE "ingest_views"'  # first, so the new view keeps its owner
     assert switch[1] == "DROP VIEW IF EXISTS chunks_active"
-    assert 'FROM "chunks_titan2_512" WHERE is_active' in switch[2]
+    assert 'FROM "chunks_compact" WHERE is_active' in switch[2]
     assert "WITH (security_invoker = true)" in switch[2]  # readers stay in their tenant
     assert switch[3].startswith("GRANT SELECT ON chunks_active TO ingest_reader")
     assert conn.commits == 1  # committed even when the read above opened a transaction
@@ -80,17 +80,17 @@ def test_tables_function_dispatches_on_a_clean_connection(
     monkeypatch.setattr(tables, "activate", fake_activate)
 
     assert tables.handler({"action": "status"}, FakeContext())["active_table"] == "x"
-    out = tables.handler({"action": "activate", "table": "chunks_titan2_512"}, FakeContext())
+    out = tables.handler({"action": "activate", "table": "chunks_compact"}, FakeContext())
 
-    assert out == {"active_table": "chunks_titan2_512"}
-    assert calls == ["chunks_titan2_512"]
+    assert out == {"active_table": "chunks_compact"}
+    assert calls == ["chunks_compact"]
     assert conn.rollbacks == 4  # before and after each call: nothing left open when warm
 
 
 @pytest.mark.parametrize(
     ("event", "error"),
     [
-        ({"action": "truncate", "table": "chunks_titan2_512"}, ValueError),  # nothing else
+        ({"action": "truncate", "table": "chunks_compact"}, ValueError),  # nothing else
         ({"action": "activate", "table": "nope"}, ValueError),
         ({"action": "migrate"}, ValueError),
     ],
@@ -106,13 +106,13 @@ def test_tables_function_refuses_other_actions(
 @pytest.mark.parametrize("action", ["status", "activate"])
 def test_migrate_no_longer_switches_tables(action: str) -> None:
     with pytest.raises(ValueError, match="tables function"):
-        migrate.handler({"action": action, "table": "chunks_titan2_512"}, FakeContext())
+        migrate.handler({"action": action, "table": "chunks_compact"}, FakeContext())
 
 
 def test_truncate_is_refused_when_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALLOW_TRUNCATE", "false")
     monkeypatch.setattr(migrate.boto3, "client", lambda *a, **k: pytest.fail("no secret read"))
-    event = {"action": "truncate", "table": "chunks_titan2_512", "confirm": "chunks_titan2_512"}
+    event = {"action": "truncate", "table": "chunks_compact", "confirm": "chunks_compact"}
 
     with pytest.raises(PermissionError, match="ALLOW_TRUNCATE"):
         migrate.handler(event, FakeContext())
@@ -121,7 +121,7 @@ def test_truncate_is_refused_when_switched_off(monkeypatch: pytest.MonkeyPatch) 
 def test_truncate_needs_confirmation_first(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(migrate.boto3, "client", lambda *a, **k: pytest.fail("no secret read"))
     with pytest.raises(ValueError, match="confirm"):
-        migrate.handler({"action": "truncate", "table": "chunks_titan2_512"}, FakeContext())
+        migrate.handler({"action": "truncate", "table": "chunks_compact"}, FakeContext())
 
 
 def test_truncate_is_allowed_by_default() -> None:

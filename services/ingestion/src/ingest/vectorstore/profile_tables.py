@@ -1,10 +1,10 @@
 """Vector tables from embedding profiles: the migrate function, after the numbered migrations,
 makes sure every configured profile has its table (ingest.embedding.profiles).
 
-A new profile's table, chunks_<profile>, gets exactly the structure chunks_titan2_1024 has after
+A new profile's table, chunks_<profile>, gets exactly the structure chunks_primary has after
 migrations 001-006, with the profile's dimension:
 
-    columns, defaults, NOT NULLs and the weighted content_tsv  LIKE chunks_titan2_1024
+    columns, defaults, NOT NULLs and the weighted content_tsv  LIKE chunks_primary
     embedding halfvec(<dimension>)
     primary key (chunk_id), CHECK (tenant_id <> '')
     partial HNSW (halfvec_cosine_ops, m 16, ef_construction 64) and GIN tsv WHERE is_active,
@@ -30,7 +30,7 @@ from ingest.vectorstore.migrations import LOCK_KEY
 if TYPE_CHECKING:
     import psycopg
 
-TEMPLATE = "chunks_titan2_1024"
+TEMPLATE = "chunks_primary"
 HNSW = "WITH (m = 16, ef_construction = 64)"
 _READER = (
     "tenant_id = current_setting('app.tenant_id', true)"

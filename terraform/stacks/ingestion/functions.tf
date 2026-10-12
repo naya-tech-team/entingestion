@@ -78,7 +78,7 @@ locals {
     ocr_start       = { handler = "ingest.steps.ocr.start", package = "core", memory = 256, timeout = 60, reserved = null, vpc = null, env = {} }
     ocr_poll        = { handler = "ingest.steps.ocr.poll", package = "core", memory = 256, timeout = 30, reserved = null, vpc = null, env = { OCR_MAX_POLLS = tostring(ceil(var.ocr_max_wait_seconds / var.ocr_poll_seconds)) } }
     ocr_collect     = { handler = "ingest.steps.ocr.collect", package = "core", memory = 2048, timeout = 900, reserved = null, vpc = null, env = {} }
-    control_api     = { handler = "ingest.control_api.app.handler", package = "core", memory = 512, timeout = 29, reserved = var.control_api_reserved_concurrency, vpc = null, env = merge(local.queue_env, local.reindex_env, local.search_env) }
+    control_api     = { handler = "ingest.control_api.app.handler", package = "core", memory = 512, timeout = 29, reserved = var.control_api_reserved_concurrency, vpc = null, env = merge(local.queue_env, local.reindex_env, local.search_env, { BACKFILL_DLQ_URL = module.backfill_queue.dlq_url }) }
     reindex_plan    = { handler = "ingest.reindex.plan", package = "core", memory = 512, timeout = 300, reserved = null, vpc = null, env = {} }
     reindex_enqueue = { handler = "ingest.reindex.enqueue", package = "core", memory = 512, timeout = 300, reserved = null, vpc = null, env = local.queue_env }
     query           = { handler = "ingest.query.handler", package = "core", memory = 512, timeout = 60, reserved = null, vpc = "db_client", env = merge(local.db_env, { DB_USER = local.db_reader }) }

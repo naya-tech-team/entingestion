@@ -38,6 +38,29 @@ AWS_PROFILE ?= entingestion-$(ENV)
 ifndef ALLOW_AMBIENT
 export AWS_PROFILE
 endif
+
+# The AWS account comes from the environment, never from a tracked file:
+#   export AWS_ACCOUNT_ID=123456789012
+# Terraform gets it as var.aws_account_id (the providers refuse any other account) and derives
+# every ARN from it; the state bucket and its KMS key are named after it (bootstrap).
+AWS_ACCOUNT_ID ?=
+ifneq ($(AWS_ACCOUNT_ID),)
+export TF_VAR_aws_account_id := $(AWS_ACCOUNT_ID)
+endif
+# People who write every producer source (Bruno, the CLI), also from the environment:
+#   export OPERATOR_PRINCIPALS=user/alice,role/ops-*      # -> var.operator_principals
+comma := ,
+empty :=
+space := $(empty) $(empty)
+ifneq ($(OPERATOR_PRINCIPALS),)
+export TF_VAR_operator_principals := [$(subst $(space),$(comma),$(patsubst %,"%",$(subst $(comma),$(space),$(OPERATOR_PRINCIPALS))))]
+endif
+
+STATE_REGION   = $(shell awk -F'"' '/^region/{print $$2}' $(BACKEND) 2>/dev/null)
+STATE_BUCKET   = entingestion-tfstate-$(AWS_ACCOUNT_ID)-$(STATE_REGION)
+STATE_KEY_ARN  = arn:aws:kms:$(STATE_REGION):$(AWS_ACCOUNT_ID):alias/entingestion-tfstate
+BACKEND_CONFIG = -backend-config=../../$(BACKEND) -backend-config=bucket=$(STATE_BUCKET) \
+                 -backend-config=kms_key_id=$(STATE_KEY_ARN)
 CREDS := $(if $(AWS_EXPORT_CREDS),eval "$$(aws configure export-credentials --format env)" &&,)
 
 # One .terraform directory per environment, so backend settings can never leak between envs.
@@ -63,22 +86,26 @@ require-env:
 	@test -d "$(STACK_DIR)" || { echo "no stack $(STACK_DIR)"; exit 1; }
 	@test -f "$(VARS)" || { echo "missing $(VARS)"; exit 1; }
 	@test -f "$(BACKEND)" || { echo "missing $(BACKEND)"; exit 1; }
+	@echo "$(AWS_ACCOUNT_ID)" | grep -Eq '^[0-9]{12}$$' || { \
+	  echo "AWS_ACCOUNT_ID must be the 12-digit account to deploy to, e.g. export AWS_ACCOUNT_ID=123456789012"; exit 1; }
 
-# Refuse to run Terraform as anything but this environment's deploy role (unless ALLOW_AMBIENT).
+# Refuse to run Terraform in any account but AWS_ACCOUNT_ID, or as anything but this
+# environment's deploy role (unless ALLOW_AMBIENT).
 whoami: require-env
-ifdef ALLOW_AMBIENT
-	@echo "ALLOW_AMBIENT: running as $$(aws sts get-caller-identity --query Arn --output text)"
-else
 	@arn=$$(aws sts get-caller-identity --query Arn --output text 2>/dev/null) || { \
 	  echo "No AWS session for profile $(AWS_PROFILE). Sign in: aws login --profile entingestion (docs/AWS_ACCESS.md)"; exit 1; }; \
+	case "$$arn" in \
+	  arn:*:*:*:$(AWS_ACCOUNT_ID):*) ;; \
+	  *) echo "AWS_ACCOUNT_ID is $(AWS_ACCOUNT_ID) but the credentials are $$arn. Fix one of them."; exit 1 ;; \
+	esac; \
+	if [ -n "$(ALLOW_AMBIENT)" ]; then echo "ALLOW_AMBIENT: running as $$arn"; exit 0; fi; \
 	case "$$arn" in \
 	  *:assumed-role/entingestion-$(ENV)-deploy/*) echo "as $$arn" ;; \
 	  *) echo "Expected role entingestion-$(ENV)-deploy, got $$arn. Check profile $(AWS_PROFILE), or ALLOW_AMBIENT=1 (break-glass)."; exit 1 ;; \
 	esac
-endif
 
 init: require-env whoami
-	$(TF) init -input=false -reconfigure -backend-config=../../$(BACKEND)
+	$(TF) init -input=false -reconfigure $(BACKEND_CONFIG)
 
 plan: init
 	$(TF) plan -input=false -var-file=../../$(VARS) -out=$(PLAN)

@@ -145,11 +145,11 @@ def env(aws: None, monkeypatch: pytest.MonkeyPatch) -> tuple[FakeVectorStore, Fa
 
     TOMBSTONES.clear()
     store, titan = FakeVectorStore(), FakeTitan()
-    tables: dict[str, FakeVectorStore] = {"chunks_titan2_1024": store}
+    tables: dict[str, FakeVectorStore] = {"chunks_primary": store}
     monkeypatch.setattr(
         vector_index,
         "get_vector_store",
-        lambda table=None: tables.setdefault(table or "chunks_titan2_1024", FakeVectorStore()),
+        lambda table=None: tables.setdefault(table or "chunks_primary", FakeVectorStore()),
     )
     store.tables = tables  # type: ignore[attr-defined]  # other tables, for reindex tests
 

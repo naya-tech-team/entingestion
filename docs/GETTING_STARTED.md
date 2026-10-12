@@ -34,11 +34,12 @@ Check: `aws login --profile entingestion` succeeds, `aws sts get-caller-identity
 
 ```bash
 aws login --profile entingestion
+export AWS_ACCOUNT_ID=<12-digit account> TF_VAR_aws_account_id=<same>
 cd terraform/bootstrap
 AWS_PROFILE=entingestion terraform init && AWS_PROFILE=entingestion terraform apply
 ```
 
-This creates the deploy roles (`entingestion-<env>-deploy`, see [AWS_ACCESS.md](AWS_ACCESS.md)), and `entingestion-tfstate-<account>-<region>`, a versioned, KMS-encrypted bucket. It holds every environment's state, at `<env>/<stack>/terraform.tfstate`. If your account ID differs, update `aws_account_id` in the tfvars and `bucket` in each `envs/<env>/*.s3.tfbackend`.
+This creates the deploy roles (`entingestion-<env>-deploy`, see [AWS_ACCESS.md](AWS_ACCESS.md)), and `entingestion-tfstate-<account>-<region>`, a versioned, KMS-encrypted bucket. It holds every environment's state, at `<env>/<stack>/terraform.tfstate`. No file names the account: it comes from `AWS_ACCOUNT_ID`. Keep that exported for every `make` target too; the Makefile passes it to Terraform, builds the state bucket and key names from it, and refuses credentials from any other account. The ARNs in the tfvars are derived from it (`role/<name>` → `arn:aws:iam::<account>:role/<name>`).
 
 ## 4. Deploy the producer
 

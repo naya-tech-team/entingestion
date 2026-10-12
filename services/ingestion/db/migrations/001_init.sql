@@ -26,7 +26,7 @@ BEGIN
   END IF;
 END $$;
 
-CREATE TABLE chunks_titan2_1024 (
+CREATE TABLE chunks_primary (
   chunk_id         text PRIMARY KEY,
   article_id       text NOT NULL,
   doc_version      int NOT NULL,
@@ -49,14 +49,14 @@ CREATE TABLE chunks_titan2_1024 (
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX chunks_titan2_1024_embedding_hnsw ON chunks_titan2_1024
+CREATE INDEX chunks_primary_embedding_hnsw ON chunks_primary
   USING hnsw (embedding halfvec_cosine_ops) WITH (m = 16, ef_construction = 64) WHERE is_active;
-CREATE INDEX chunks_titan2_1024_article_version ON chunks_titan2_1024 (article_id, doc_version);
-CREATE INDEX chunks_titan2_1024_tsv ON chunks_titan2_1024 USING gin (content_tsv) WHERE is_active;
-CREATE INDEX chunks_titan2_1024_tenant ON chunks_titan2_1024 (tenant_id) WHERE is_active;
+CREATE INDEX chunks_primary_article_version ON chunks_primary (article_id, doc_version);
+CREATE INDEX chunks_primary_tsv ON chunks_primary USING gin (content_tsv) WHERE is_active;
+CREATE INDEX chunks_primary_tenant ON chunks_primary (tenant_id) WHERE is_active;
 
 -- Readers query this view; a model change switches it to another table (brief §7.3).
-CREATE OR REPLACE VIEW chunks_active AS SELECT * FROM chunks_titan2_1024 WHERE is_active;
+CREATE OR REPLACE VIEW chunks_active AS SELECT * FROM chunks_primary WHERE is_active;
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON chunks_titan2_1024 TO ingest_writer;
-GRANT SELECT ON chunks_titan2_1024, chunks_active TO ingest_reader, ingest_writer;
+GRANT SELECT, INSERT, UPDATE, DELETE ON chunks_primary TO ingest_writer;
+GRANT SELECT ON chunks_primary, chunks_active TO ingest_reader, ingest_writer;

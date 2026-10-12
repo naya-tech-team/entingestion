@@ -23,7 +23,7 @@ import boto3
 from boto3.dynamodb.conditions import Attr
 from gate_phase1 import tf_output
 
-TABLES = ("chunks_titan2_1024", "chunks_titan2_512")
+TABLES = ("chunks_primary", "chunks_compact")
 
 
 def invoke(function: str, payload: dict[str, Any]) -> dict[str, Any]:

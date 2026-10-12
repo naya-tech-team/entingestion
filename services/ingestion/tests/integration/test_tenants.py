@@ -22,7 +22,7 @@ from tests.integration.test_index import rows
 pytestmark = pytest.mark.integration
 
 MIGRATIONS = Path(__file__).parents[2] / "db" / "migrations"
-TABLE = "chunks_titan2_1024"
+TABLE = "chunks_primary"
 
 
 @contextmanager
@@ -77,7 +77,7 @@ def test_ops_status_and_the_switch_cover_every_tenant(pg: Any) -> None:
     seed(pg)
     with as_role(pg, "ingest_ops") as conn:
         assert status(conn)["tables"][TABLE]["active_rows"] == 5
-        activate(conn, "chunks_titan2_512")
+        activate(conn, "chunks_compact")
         activate(conn, TABLE)
     # The recreated view still checks the caller.
     with as_role(pg, "ingest_reader") as conn:
@@ -127,7 +127,7 @@ def test_migration_005_backfills_existing_rows(pg_url: str, tmp_path: Path) -> N
             apply(conn, tmp_path)
             conn.autocommit = False
             conn.execute(
-                "INSERT INTO chunks_titan2_512 (chunk_id, article_id, doc_version, ordinal,"
+                "INSERT INTO chunks_compact (chunk_id, article_id, doc_version, ordinal,"
                 " is_active, text, embed_text, token_count, metadata, embedding, embedding_model,"
                 " pipeline_version) VALUES ('c1', 'art_1', 1, 0, true, 'old words', 'old words',"
                 " 2, %s::jsonb, %s::halfvec, 'm', 'v1')",
@@ -136,7 +136,7 @@ def test_migration_005_backfills_existing_rows(pg_url: str, tmp_path: Path) -> N
                     "[" + ",".join(["0.01"] * 512) + "]",
                 ),
             )
-            activate(conn, "chunks_titan2_512")
+            activate(conn, "chunks_compact")
             assert apply(conn, MIGRATIONS) == ["005", *(m.stem[:3] for m in _after_005())]
             conn.autocommit = False
             row = conn.execute(
@@ -147,7 +147,7 @@ def test_migration_005_backfills_existing_rows(pg_url: str, tmp_path: Path) -> N
                 "SELECT reloptions FROM pg_class WHERE relname = 'chunks_active'"
             ).fetchone()[0]
             assert "security_invoker=true" in options
-            assert status(conn)["active_table"] == "chunks_titan2_512"
+            assert status(conn)["active_table"] == "chunks_compact"
     finally:
         with psycopg.connect(pg_url, autocommit=True) as admin:
             admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')

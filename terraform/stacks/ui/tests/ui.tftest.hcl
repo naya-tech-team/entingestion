@@ -245,6 +245,13 @@ run "bff_may_invoke_only_its_allow_list" {
         "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/GET/v1/processes/*/summary",
         "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/GET/v1/processes/*/articles",
         "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/GET/v1/articles/*/status",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/GET/v1/ops/overview",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/GET/v1/articles",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/GET/v1/tables",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/search",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/ingest",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/processes/*/ingest",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/dlq/redrive",
       ])
     )
     error_message = "The BFF role may invoke exactly the allow-listed upstream routes."
@@ -254,17 +261,35 @@ run "bff_may_invoke_only_its_allow_list" {
     condition = alltrue([
       for r in flatten([for s in data.aws_iam_policy_document.bff.statement : s.resources]) :
       !strcontains(r, "/DELETE/") && !strcontains(r, "/PATCH/") && !strcontains(r, "/PUT/")
-      && !strcontains(r, "/*/*/") && !strcontains(r, "/v1/tables") && !strcontains(r, "reindex")
+      && !strcontains(r, "/*/*/") && !strcontains(r, "reindex")
+      && !strcontains(r, "/v1/tables/")
     ])
-    error_message = "No DELETE, PATCH or PUT, no method wildcard, no tables or reindex routes."
+    error_message = "No DELETE, PATCH or PUT, no method wildcard, no reindex and no table writes (only GET /v1/tables)."
+  }
+
+  assert {
+    condition = length(setintersection(
+      toset(flatten([for s in data.aws_iam_policy_document.bff.statement : s.resources])),
+      toset([
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/reindex",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/tables/active",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/DELETE/v1/tables/writes/*",
+      ])
+    )) == 0
+    error_message = "Model operations (reindex, table switch, retire) stay CLI-only."
   }
 
   assert {
     condition = alltrue([
       for r in flatten([for s in data.aws_iam_policy_document.bff.statement : s.resources]) :
-      startswith(r, "arn:aws:execute-api:us-west-2:123456789012:ctl222/") ? strcontains(r, "/GET/") : true
+      startswith(r, "arn:aws:execute-api:us-west-2:123456789012:ctl222/") ? (strcontains(r, "/GET/") || contains([
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/search",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/ingest",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/processes/*/ingest",
+        "arn:aws:execute-api:us-west-2:123456789012:ctl222/*/POST/v1/dlq/redrive",
+      ], r)) : true
     ])
-    error_message = "The control API is read-only for the BFF."
+    error_message = "On the control API the BFF may only read, search, re-run and redrive."
   }
 
   assert {
