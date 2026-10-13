@@ -19,25 +19,26 @@ def handler(ctx: StepContext) -> StepOutput:
     doc = NormalizedDocument.model_validate_json(ctx.staging.read(ctx.staging_prefix, INPUT))
     s = ctx.settings
     chunker = Chunker(
-        Tokenizer(s.tokenizer_encoding),
+        Tokenizer(s.chunking.tokenizer_encoding),
         ChunkerConfig(
-            target=s.chunk_target_tokens,
-            overlap=s.chunk_overlap_tokens,
-            min_tokens=s.chunk_min_tokens,
-            max_tokens=s.max_chunk_tokens,
-            parent_child=s.parent_child_enabled,
-            parent_target=s.parent_target_tokens,
-            child_target=s.child_target_tokens,
-            child_min=s.child_min_tokens,
+            target=s.chunking.target_tokens,
+            overlap=s.chunking.overlap_tokens,
+            min_tokens=s.chunking.min_tokens,
+            max_tokens=s.chunking.max_chunk_tokens,
+            parent_child=s.chunking.parent_child,
+            parent_target=s.chunking.parent_target_tokens,
+            child_target=s.chunking.child_target_tokens,
+            child_min=s.chunking.child_min_tokens,
         ),
     )
     chunks = chunker.chunk(doc)
-    if len(chunks) > s.max_chunks_per_article:
+    if len(chunks) > s.chunking.max_chunks_per_article:
         # Bounds what one article can cost in Bedrock calls and index rows. Permanent: the
         # same document chunks the same way; raise the limit and replay to index it.
         raise make_error(
             ErrorCode.TOO_LARGE,
-            f"{len(chunks)} chunks, more than max_chunks_per_article ({s.max_chunks_per_article})",
+            f"{len(chunks)} chunks, more than max_chunks_per_article"
+            f" ({s.chunking.max_chunks_per_article})",
         )
     body = "\n".join(c.model_dump_json() for c in chunks).encode()
     staged = ctx.staging.write(ctx.staging_prefix, OUTPUT, body, ctx.run_id, "application/x-ndjson")

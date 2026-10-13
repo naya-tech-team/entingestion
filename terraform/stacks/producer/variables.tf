@@ -145,7 +145,7 @@ variable "max_file_bytes" {
 }
 
 variable "allowed_content_types" {
-  description = "Content types accepted for upload. Empty uses the application default (brief §4)."
+  description = "Content types accepted for upload. Empty uses the application default (the producer service's list)."
   type        = list(string)
   default     = []
 }
@@ -207,13 +207,17 @@ variable "backup_enabled" {
 }
 
 variable "backup_copy_region" {
-  description = "Region the backups are copied to (disaster recovery); must differ from region."
+  description = "Region the backups are copied to (disaster recovery); must differ from region. Set in envs/<env>/producer.tfvars: null where backup_enabled is false."
   type        = string
-  default     = "us-east-2"
 
   validation {
-    condition     = var.backup_copy_region != var.region
+    condition     = var.backup_copy_region == null || var.backup_copy_region != var.region
     error_message = "backup_copy_region must be another region than region."
+  }
+
+  validation {
+    condition     = !var.backup_enabled || var.backup_copy_region != null
+    error_message = "backup_enabled needs a backup_copy_region to copy the backups to."
   }
 }
 
@@ -247,12 +251,12 @@ variable "api_reserved_concurrency" {
   default     = null
 }
 
-# -- Access (review C3) ---------------------------------------------------------
+# -- Access -----------------------------------------------------------------------
 
 variable "source_access" {
   description = <<-EOT
     Which principals may write and read each source, and the tenant its articles belong to
-    (producer.authz). Principals are relative to this account ("role/<name>", "user/<name>"),
+    (entcommon.authz in services/common). Principals are relative to this account ("role/<name>", "user/<name>"),
     and the stack derives the ARN from aws_account_id; a full ARN (another account) is kept as is.
     Patterns are shell-style and match the caller ARN or, for an assumed role, the role ARN. A source missing here can't be used; an empty map allows nothing.
     Readers and writers of a source may also search its tenant (ingestion POST /v1/search).
@@ -308,7 +312,7 @@ variable "operator_principals" {
 
   validation {
     condition     = alltrue([for p in var.operator_principals : can(regex("^((user|role)/|arn:)", p))])
-    error_message = "Each operator principal is \"role/<name>\" or \"user/<name>\" in this account, or a full ARN."
+    error_message = "Each operator principal is \"role/<name>\" or \"user/<name>\" in this account, or a full ARN. Not valid: ${jsonencode([for p in var.operator_principals : p if !can(regex("^((user|role)/|arn:)", p))])} (from OPERATOR_PRINCIPALS / TF_VAR_operator_principals)."
   }
 }
 
@@ -319,11 +323,11 @@ variable "admin_principals" {
 
   validation {
     condition     = alltrue([for p in var.admin_principals : can(regex("^((user|role)/|arn:)", p))])
-    error_message = "Each admin principal is \"role/<name>\" or \"user/<name>\" in this account, or a full ARN."
+    error_message = "Each admin principal is \"role/<name>\" or \"user/<name>\" in this account, or a full ARN. Not valid: ${jsonencode([for p in var.admin_principals : p if !can(regex("^((user|role)/|arn:)", p))])}."
   }
 }
 
-# -- Lifecycle (review M2.2) -------------------------------------------------------
+# -- Lifecycle --------------------------------------------------------------------
 
 variable "janitor_schedule" {
   description = "How often the janitor runs (EventBridge Scheduler expression)."

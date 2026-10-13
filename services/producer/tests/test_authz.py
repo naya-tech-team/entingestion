@@ -1,4 +1,5 @@
-"""Per-source authorization (review C3): who may write and read which source."""
+"""Per-source authorization through the API: who may write and read which source. The policy
+itself (ARN matching, levels) is tested in services/common."""
 
 from __future__ import annotations
 
@@ -6,42 +7,9 @@ from typing import Any
 
 import pytest
 
-from producer.authz import AccessPolicy, identities
-from tests.conftest import ADMIN_ARN, CALLER_ARN, OTHER_ARN, READER_ARN, ApiCall
+from tests.conftest import ADMIN_ARN, OTHER_ARN, READER_ARN, ApiCall
 from tests.test_api import PDF, create_process, put_article, ticket_body
 from tests.test_registrar import article, new_process, upload_and_register
-
-
-def test_assumed_role_sessions_match_their_role() -> None:
-    session = "arn:aws:sts::123456789012:assumed-role/news-search/abc"
-    assert identities(session) == [session, "arn:aws:iam::123456789012:role/news-search"]
-    assert identities(CALLER_ARN) == [CALLER_ARN]
-
-
-def test_no_configuration_allows_nothing() -> None:
-    policy = AccessPolicy.from_json("")
-    assert not policy.can_write(CALLER_ARN, "news")
-    assert not policy.can_read(CALLER_ARN, "news")
-
-
-def test_writers_readers_and_admins() -> None:
-    policy = AccessPolicy.from_json(
-        '{"sources": {"news": {"tenant_id": "t", "writers": ["arn:aws:iam::111122223333:role/w"],'
-        ' "readers": ["arn:aws:iam::111122223333:role/r-*"]}},'
-        ' "admins": ["arn:aws:iam::111122223333:role/admin"]}'
-    )
-    writer = "arn:aws:sts::111122223333:assumed-role/w/s"
-    reader = "arn:aws:sts::111122223333:assumed-role/r-search/s"
-    admin = "arn:aws:sts::111122223333:assumed-role/admin/s"
-    assert policy.can_write(writer, "news")
-    assert policy.can_read(writer, "news")
-    assert policy.can_read(reader, "news")
-    assert not policy.can_write(reader, "news")
-    assert policy.can_write(admin, "news")
-    assert policy.can_write(admin, "unknown")
-    assert not policy.can_read(writer, "sports")
-    assert policy.tenant_for("news") == "t"
-    assert policy.tenant_for("sports") is None
 
 
 def test_only_writers_of_a_source_create_its_processes(api: ApiCall) -> None:

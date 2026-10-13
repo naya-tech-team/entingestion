@@ -106,7 +106,7 @@ def test_unchanged_content_is_skipped_and_counted_for_a_new_process(store: Statu
     assert store.latest("art_1")["status"] == "INDEXED"  # type: ignore[index]
     assert summary(store, "prc_A") == {"indexed": 1, "skipped": 0, "failed": 0}
     assert summary(store, "prc_B") == {"indexed": 0, "skipped": 1, "failed": 0}
-    # Only the RUN# item was written for the skipped run (brief §6.3: "skipped 1").
+    # Only the RUN# item was written for the skipped run.
     assert len(store.run_items("art_1", skip_run)) == 1
 
 
@@ -478,7 +478,7 @@ def _conflicts(store: StatusStore, monkeypatch: pytest.MonkeyPatch, times: int) 
         return real(**kwargs)
 
     monkeypatch.setattr(store.client, "transact_write_items", flaky)
-    monkeypatch.setattr("ingest.status.store._CONFLICT_BASE_S", 0)
+    monkeypatch.setattr("ingest.status.base._CONFLICT_BASE_S", 0)
     return calls
 
 
@@ -613,6 +613,8 @@ def test_process_completes_when_counts_reach_registered(store: StatusStore) -> N
         "expected_count": 2,
         "registered_count": 2,
         "rejected_count": 0,
+        "tickets_issued": 2,
+        "pending_uploads": 0,
     }
 
     assert store.complete_process_if_done("prc_A", producer_process) is None  # 1 of 2
@@ -630,6 +632,8 @@ def test_unsettled_producer_process_never_completes(store: StatusStore) -> None:
         "expected_count": None,
         "registered_count": 1,
         "rejected_count": 0,
+        "tickets_issued": 1,
+        "pending_uploads": 0,
     }
 
     assert store.complete_process_if_done("prc_A", open_process) is None

@@ -2,7 +2,160 @@
 
 How to deploy, watch and repair the ingestion pipeline. Diagrams of every flow are in [docs/diagrams](diagrams/); step-by-step flows in [WORKFLOWS.md](WORKFLOWS.md); requests for every route in the [Bruno collection](../bruno/README.md). The producer has its own runbook in [services/producer/README.md](../services/producer/README.md#operations-runbook). Design and decisions: [services/ingestion/README.md](../services/ingestion/README.md).
 
-Every command assumes the repo root and AWS credentials for the account. Replace `<env>` with `dev` or `prod`.
+Every command assumes the repo root and AWS credentials for the account. Replace `<env>` with `dev` or `prod`, and `<region>` with the stacks' region (`region` in `terraform/envs/<env>/common.tfvars`). Configuration (environment variables, tfvars) is listed in [Configuration](#configuration).
+
+## Deploy an environment, step by step
+
+The whole sequence, from an empty shell to a working environment. Run the steps in order. Each step links to the section with the details.
+
+| Placeholder | Meaning |
+|---|---|
+| `<account>` | The 12-digit AWS account to deploy to |
+| `<state region>` | The region the bootstrap was applied in, which holds the state bucket. It can differ from the stacks' region |
+| `<region>` | Where the stacks deploy: `region` in `terraform/envs/<env>/common.tfvars` |
+| `<you>` | Your IAM user or role in that account, e.g. `user/jane` |
+
+### Step 0: Commit your work
+
+Deploy from a committed tree, so you know which code is running.
+
+```bash
+git status
+git add -A && git commit -m "<message>"
+```
+
+On macOS (case-insensitive), a file renamed only by case, such as `claude.md` → `CLAUDE.md`, needs `git rm --cached <old name>` before `git add`, or git keeps the old name.
+
+### Step 1: Shell setup (every new terminal)
+
+```bash
+# Behind Zscaler only (see "Behind a TLS-inspecting proxy")
+export AWS_CA_BUNDLE=~/.aws/ca-bundle.pem UV_SYSTEM_CERTS=1 NODE_EXTRA_CA_CERTS=~/.aws/zscaler-root.pem
+
+export AWS_ACCOUNT_ID=<account>                          # every deploy and teardown target needs it
+export STATE_REGION=<state region>                       # the bootstrap's region (state bucket)
+export AWS_REGION=<region> AWS_DEFAULT_REGION=<region>   # the stacks' region; boto3 reads only the second
+export OPERATOR_PRINCIPALS=<you>                         # you may use Bruno and the CLI on every source
+
+# Either the deploy role (after step 3: aws login with MFA, profiles set up) …
+aws login --profile entingestion
+# … or, until then, your own admin credentials (break-glass):
+export ALLOW_AMBIENT=1
+
+make -C terraform whoami ENV=<env>   # must show an ARN in <account>; refuses any other account
+```
+
+### Step 2: Bootstrap (once per account, and again whenever it changes)
+
+Creates the state bucket and its key, the deploy roles, the workload boundaries and the audit trail. Run it as an admin of the account. Details: [Bootstrap](#bootstrap-once-per-account).
+
+```bash
+cd terraform/bootstrap
+export TF_VAR_aws_account_id=$AWS_ACCOUNT_ID TF_VAR_region=<state region>
+export TF_VAR_deploy_principal_arns='["<you>"]'   # you must be on it: the bucket policy denies everyone else
+terraform init
+terraform plan -out=bootstrap.tfplan              # first time: creates only; later: expect no changes
+terraform apply bootstrap.tfplan
+terraform output                                  # state_bucket, deploy_role_arns, workload_boundary_arns
+cd ../..
+```
+
+Stop if a plan wants to replace or destroy the state bucket, its KMS key or the trail.
+
+Local bootstrap state (`terraform/bootstrap/terraform.tfstate`) belongs to one account. Move it aside before bootstrapping a different account.
+
+### Step 3: Deploy-role profiles (optional; replaces `ALLOW_AMBIENT`)
+
+Add MFA to your IAM user, add the `entingestion-<env>` profiles to `~/.aws/config` with `role_arn = arn:aws:iam::<account>:role/entingestion-<env>-deploy`, then:
+
+```bash
+aws login --profile entingestion
+unset ALLOW_AMBIENT
+make -C terraform whoami ENV=<env>   # …:assumed-role/entingestion-<env>-deploy/…
+```
+
+Details: [AWS_ACCESS.md](AWS_ACCESS.md#one-time-setup).
+
+### Step 4: Review the environment's tfvars
+
+| File | Check |
+|---|---|
+| `terraform/envs/<env>/common.tfvars` | `region`; `mandatory_tags`, with no `"TBD"` values for prod |
+| `terraform/envs/<env>/{producer,ingestion,ui}.tfvars` | `workload_boundary_enabled = true` once the bootstrap exists |
+| `terraform/envs/<env>/ingestion.tfvars` | `embedding_profiles`, `default_profile`, `rerank_model_id`; `allow_truncate` (dev only); `backup_copy_region` (`null` in dev) |
+| `terraform/envs/<env>/producer.tfvars` | `source_access` (sources, tenants, writers such as `role/ui-<env>-bff`), `admin_principals` |
+| prod only | `alarm_emails` and `source_access`: a prod plan fails without them |
+
+### Step 5: Account prerequisites (one-time checks)
+
+```bash
+# Bedrock: the embedding model of every profile must be enabled in <region> (console → Bedrock → Model access)
+aws bedrock list-foundation-models --region <region> --query 'modelSummaries[?contains(modelId, `embed`)].modelId'
+# Lambda concurrency: at least 100 (prod: 1,000)
+aws service-quotas get-service-quota --service-code lambda --quota-code L-B99A9384 --region <region> --query Quota.Value
+```
+
+The rest, for prod, is in [Prerequisites for a new environment](#prerequisites-for-a-new-environment).
+
+### Step 6: Build the Lambda packages
+
+```bash
+make -C terraform build   # producer, ingestion (core + docs), UI backend; deterministic zips
+```
+
+Rebuild after every code change, before the deploy that ships it.
+
+### Step 7: Deploy the stacks, in this order
+
+Each `deploy` plans, asks you to type the environment name, applies that plan, and, for ingestion, runs `migrate`. Read each plan: no data store may be replaced.
+
+```bash
+make -C terraform deploy ENV=<env> STACK=producer    # 1. producer: API, upload bucket, tables
+make -C terraform deploy ENV=<env> STACK=ingestion   # 2. ingestion: pipeline, database, control API; then migrate
+make -C terraform deploy ENV=<env> STACK=ui          # 3. upload UI: CloudFront, site bucket, backend
+make -C terraform deploy ENV=<env> STACK=producer    # 4. producer again: upload-bucket CORS for the UI's address
+```
+
+- Step 2 takes 20–40 minutes the first time (database, VPC endpoints).
+- Step 4 is needed only the first time, or when the UI's address changes.
+- A failed deploy resumes by running the same command again.
+
+What `migrate` does: [Deploy](#deploy).
+
+### Step 8: Set up the upload UI
+
+```bash
+make -C terraform ui-password ENV=<env>   # set the login (prompts; stores only a hash); also how to rotate it
+make -C terraform ui-deploy ENV=<env>     # build the web app, upload it, invalidate the cache
+make -C terraform ui-url ENV=<env>        # the address to open
+```
+
+### Step 9: Verify
+
+```bash
+# The UI end to end: login gate, 3 small files to INDEXED, operations, cleanup
+cd services/ui/bff
+UI_ENV=<env> UI_USER=<ui user> UI_PASSWORD='<ui password>' uv run python scripts/ui_acceptance.py
+cd ../../..
+
+# The pipeline with a few generated articles (never the full 1,000 in dev)
+cd services/ingestion
+uv run python scripts/sample_corpus.py /tmp/smoke --count 3
+uv run python scripts/gate_phase1.py --corpus /tmp/smoke --env <env> --timeout-minutes 15   # "GATE PASSED"
+cd ../..
+```
+
+Then open the UI's address, log in, and drag in a file: it should reach INDEXED within a few minutes.
+
+### Afterwards
+
+| Task | Command or section |
+|---|---|
+| Ship a code change | rebuild (step 6), then `make -C terraform deploy ENV=<env> STACK=<stack>`; web only: `make -C terraform ui-deploy ENV=<env>` |
+| Roll back a function | [Roll back a bad deploy](#roll-back-a-bad-deploy) |
+| Re-run failed articles | the UI's Operations tab, or [Failed articles](#failed-articles) |
+| Tear down (dev only) | `make -C terraform destroy-all ENV=<env> DRY_RUN=1`, then without `DRY_RUN`; [Tear down](#tear-down-a-disposable-environment) |
+| Errors seen before | [Behind a TLS-inspecting proxy](#behind-a-tls-inspecting-proxy-zscaler); the errors table under [Tear down](#tear-down-a-disposable-environment) |
 
 ## Where to look
 
@@ -26,11 +179,12 @@ Nobody uses access keys. Sign in with `aws login --profile entingestion` (MFA). 
 **Until the deploy roles exist** (bootstrap not applied, no `aws login` yet), every make target runs on your own credentials through the break-glass switch, with the region set explicitly:
 
 ```bash
-export AWS_ACCOUNT_ID=<12-digit account> ALLOW_AMBIENT=1 AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2
+export AWS_ACCOUNT_ID=<12-digit account> ALLOW_AMBIENT=1 AWS_REGION=<region> AWS_DEFAULT_REGION=<region>
+export STATE_REGION=<bootstrap region>    # only if the state bucket is in another region than AWS_REGION
 make -C terraform whoami ENV=dev          # shows your user; refuses credentials of another account
 ```
 
-Set the region in both variables. Otherwise `~/.aws/config` decides it, and its `[default]` profile is `us-east-1`. The AWS CLI reads `AWS_REGION`, but boto3 (the Python scripts and `teardown.py`) reads only `AWS_DEFAULT_REGION`.
+Set the region in both variables. Otherwise `~/.aws/config` decides it, and its `[default]` profile may name another region. The AWS CLI reads `AWS_REGION`, but boto3 (the Python scripts and `teardown.py`) reads only `AWS_DEFAULT_REGION`. The Makefile's own AWS CLI calls (migrate, rollback, ui-*, destroy) always use the stacks' region from `common.tfvars`.
 
 **For a tool that can't use the profile** (for example a script or SDK that can't read an `aws login` session or follow the role chain), export short-lived credentials into the shell first:
 
@@ -38,7 +192,7 @@ Set the region in both variables. Otherwise `~/.aws/config` decides it, and its 
 eval "$(tools/aws-env.sh entingestion-dev)"
 ```
 
-[`tools/aws-env.sh`](../tools/aws-env.sh) sets both region variables too. The credentials last up to 1 hour, so run it again when they expire. Nothing is written to disk.
+[`tools/aws-env.sh`](../tools/aws-env.sh) sets both region variables too: the profile's `region`, else `AWS_REGION` / `AWS_DEFAULT_REGION` from your shell. It has no default region and fails if neither is set. The credentials last up to 1 hour, so run it again when they expire. Nothing is written to disk.
 
 ### Behind a TLS-inspecting proxy (Zscaler)
 
@@ -74,17 +228,23 @@ Every Terraform operation goes through [`terraform/Makefile`](../terraform/Makef
 
 `make: *** terraform: No such file or directory` means you used `-C terraform` outside the repo root. The tables below use the repo-root form.
 
-**Deploy and inspect.** These need `ENV`, plus `STACK` (default `producer`). Each one first checks that you're running as `entingestion-<ENV>-deploy`.
+**Build.** No AWS access, no `ENV`.
+
+| Command | Does |
+|---|---|
+| `make -C terraform build` | Builds every Lambda zip the stacks deploy: `services/producer/dist/producer_lambda.zip`, `services/ingestion/dist/{core,docs}.zip`, `services/ui/bff/dist/bff_lambda.zip`. Deterministic: unchanged code gives the same bytes, so a plan only updates functions whose code changed |
+
+**Deploy and inspect.** These need `ENV`, plus `STACK` (default `producer`), `AWS_ACCOUNT_ID` and a state region (`STATE_REGION`, default `AWS_REGION`). Each one first checks that you're running as `entingestion-<ENV>-deploy`.
 
 | Command | Does |
 |---|---|
 | `make -C terraform whoami ENV=<env>` | Shows the identity Terraform would run as, and stops if it isn't `entingestion-<env>-deploy` |
-| `make -C terraform init ENV=<env> STACK=<stack>` | `terraform init` with the env's backend (`envs/<env>/<stack>.s3.tfbackend`, plus the state bucket and key derived from `AWS_ACCOUNT_ID`). Each env gets its own `.terraform/<env>` directory |
-| `make -C terraform plan ENV=<env> STACK=<stack>` | init, then plan with `envs/<env>/<stack>.tfvars`. Saves the plan to `stacks/<stack>/<env>.tfplan` |
+| `make -C terraform init ENV=<env> STACK=<stack>` | `terraform init` with the env's backend (`envs/<env>/<stack>.s3.tfbackend` for the key, plus `-backend-config` for the region `STATE_REGION`, the bucket `entingestion-tfstate-<AWS_ACCOUNT_ID>-<STATE_REGION>` and its KMS key). Each env gets its own `.terraform/<env>` directory |
+| `make -C terraform plan ENV=<env> STACK=<stack>` | init, then plan with `envs/<env>/common.tfvars` and then `envs/<env>/<stack>.tfvars` (which may override it). Saves the plan to `stacks/<stack>/<env>.tfplan` |
 | `make -C terraform apply ENV=<env> STACK=<stack>` | Applies exactly the saved plan, then deletes it. Refuses if there's no saved plan |
 | `make -C terraform output ENV=<env> STACK=<stack>` | Prints the stack's outputs. Add `-s` to drop make's own lines, for example in `$(…)` |
-| `make -C terraform deploy ENV=<env> STACK=<stack>` | `plan`, asks you to type the env name, `apply` of that plan, then for `ingestion` `migrate`. `AUTO_APPROVE=1` skips the question (CI) |
-| `make -C terraform migrate ENV=<env>` | Invokes `ingestion-<env>-migrate:live` and fails if the function did. Idempotent |
+| `make -C terraform deploy ENV=<env> STACK=<stack>` | `plan`, asks you to type the env name, `apply` of that plan, then for `ingestion` `migrate`. `AUTO_APPROVE=1` skips the question (scripted use) |
+| `make -C terraform migrate ENV=<env>` | Invokes the migrate function's `live` alias (the name comes from the ingestion output `migrate_function_name`; `MIGRATE_FN=<name>:<alias>` overrides it) and fails if the function did. Idempotent |
 | `make -C terraform versions ENV=<env> FN=<function>` | The version the function's `live` alias points at, and the last 10 published versions |
 | `make -C terraform rollback ENV=<env> FN=<function> VERSION=<n>` | Points the function's `live` alias at version `n`. See [Roll back a bad deploy](#roll-back-a-bad-deploy) |
 
@@ -92,7 +252,7 @@ Every Terraform operation goes through [`terraform/Makefile`](../terraform/Makef
 
 | Command | Does |
 |---|---|
-| `make -C terraform destroy ENV=<env> STACK=<stack>` | Runs `scripts/teardown.py` for one stack: preflight, confirmation, Aurora, `terraform destroy`, vector tables. Re-run it to resume after a failure |
+| `make -C terraform destroy ENV=<env> STACK=<stack>` | Runs `scripts/teardown.py` for one stack, with the same var files as `plan` (`--var-file` for `common.tfvars`, then for `<stack>.tfvars`): preflight, confirmation, Aurora, `terraform destroy`, DynamoDB tables. Re-run it to resume after a failure |
 | `make -C terraform destroy-all ENV=<env>` | `destroy` for every stack that has tfvars in `envs/<env>/`, dependents first (ui, ingestion, then producer) |
 
 **Upload UI.** See [UI.md](UI.md). Except `ui-build`, these need `ENV`, check the deploy role, and read the `ui` stack's outputs, so deploy that stack first.
@@ -103,9 +263,9 @@ Every Terraform operation goes through [`terraform/Makefile`](../terraform/Makef
 | `make -C terraform ui-deploy ENV=<env>` | `ui-build`, then uploads `dist/` to the site bucket (hashed `assets/` immutable, everything else `no-cache`) and invalidates `/index.html` |
 | `make -C terraform ui-password ENV=<env>` | Prompts for a username and password (not echoed) and stores only the SHA-256 of the `Authorization` header in the CloudFront KeyValueStore. Also how you rotate it |
 | `make -C terraform ui-url ENV=<env>` | Prints the UI's URL |
-| `make -C terraform ui-dev ENV=<env>` | Runs the web app on `http://localhost:5173`, proxying `/api` to that environment's CloudFront. Set `UI_USER` and `UI_PASSWORD` in your shell first |
+| `make -C terraform ui-dev ENV=<env>` | Runs the web app on `http://localhost:$UI_DEV_PORT` (default 5173), proxying `/api` to that environment's CloudFront. Set `UI_USER` and `UI_PASSWORD` in your shell first. Another port must also be in the producer's `ui_extra_origins` (raw-bucket CORS) |
 
-**Static checks.** These need no AWS access; CI runs `check`.
+**Static checks.** These need no AWS access. CI is disabled (`.github/workflows/ci.yml` is commented out), so run `check` locally before every change.
 
 | Command | Does |
 |---|---|
@@ -122,6 +282,9 @@ Every Terraform operation goes through [`terraform/Makefile`](../terraform/Makef
 | Variable | Default | Effect |
 |---|---|---|
 | `AWS_ACCOUNT_ID` | none | The 12-digit account. Required by every deploy and teardown target: passed to Terraform as `aws_account_id` (every ARN is derived from it), names the state bucket and key, and the Makefile refuses credentials from any other account. No tracked file names the account |
+| `STATE_REGION` | `AWS_REGION` | The region of the Terraform state bucket: the region `terraform/bootstrap` was applied in. It names the bucket (`entingestion-tfstate-<account>-<STATE_REGION>`) and its key and is passed as `-backend-config=region=`. It may differ from the stacks' `region` in `envs/<env>/common.tfvars`, and must equal the bootstrap's: an account bootstrapped in `us-east-1` needs `STATE_REGION=us-east-1` even when its stacks run in `us-west-2`. Required (directly or through `AWS_REGION`) |
+| `AWS_REGION` | none | The default for `STATE_REGION`. The stacks' own region comes from `common.tfvars`, never from this |
+| `AWS_PARTITION` | `aws` | The partition in the state key's ARN (`aws-us-gov`, `aws-cn` elsewhere) |
 | `OPERATOR_PRINCIPALS` | none | Comma-separated people (`user/<name>`, `role/<name>`, or full ARNs) who write every producer source, for Bruno, the CLI and the acceptance scripts. Passed to the producer stack as `operator_principals`. No tracked file names them; unset, only the principals in the tfvars have access |
 | `ENV` | none | `dev` or `prod`. Required by every deploy and teardown target |
 | `STACK` | `producer` | `producer`, `ingestion` or `ui` |
@@ -132,6 +295,8 @@ Every Terraform operation goes through [`terraform/Makefile`](../terraform/Makef
 | `FINAL_SNAPSHOT=1` | off | `destroy` and `destroy-all`: take a final Aurora snapshot before deleting the cluster |
 | `AUTO_APPROVE=1` | off | `deploy`: apply without asking |
 | `FN`, `VERSION` | none | `rollback` and `versions`: the function (for example `ingestion-prod-embed`) and the version to go back to |
+| `MIGRATE_FN` | the ingestion output `migrate_function_name` + `:live` | `migrate`: the function to invoke |
+| `UI_DEV_PORT` | `5173` | `ui-dev`: the local Vite port |
 
 ### Example commands
 
@@ -141,9 +306,10 @@ Copy-paste sequences, from the repo root. Set the session up once per shell, the
 
 ```bash
 export AWS_ACCOUNT_ID=<12-digit account>                    # required by every deploy/teardown target
-export AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2    # boto3 reads only the first, the CLI either
+export AWS_REGION=<region> AWS_DEFAULT_REGION=<region>      # the stacks' region (common.tfvars); boto3 reads only the second
+export STATE_REGION=<bootstrap region>                      # only if the state bucket is elsewhere (default AWS_REGION)
 export AWS_CA_BUNDLE=~/.aws/ca-bundle.pem                   # behind Zscaler (see above)
-export UV_SYSTEM_CERTS=1 REQUESTS_CA_BUNDLE=~/.aws/ca-bundle.pem
+export UV_SYSTEM_CERTS=1 REQUESTS_CA_BUNDLE=~/.aws/ca-bundle.pem NODE_EXTRA_CA_CERTS=~/.aws/zscaler-root.pem
 export OPERATOR_PRINCIPALS=user/<you>                       # you write every producer source (Bruno, CLI)
 
 # With the deploy roles (bootstrap applied, profiles added):
@@ -158,9 +324,7 @@ make -C terraform whoami ENV=dev                            # ALLOW_AMBIENT: run
 **2. First deploy of an environment.** The bootstrap must already be applied in the account; see [Bootstrap](#bootstrap-once-per-account).
 
 ```bash
-services/producer/scripts/build_lambda.sh                   # services/producer/dist/producer_lambda.zip
-services/ingestion/scripts/build_lambda.sh all              # services/ingestion/dist/{core,docs}.zip
-services/ui/bff/scripts/build_lambda.sh                     # services/ui/bff/dist/bff_lambda.zip
+make -C terraform build                                     # every Lambda zip (no AWS access)
 
 make -C terraform deploy ENV=dev STACK=producer             # 1. producer
 make -C terraform deploy ENV=dev STACK=ingestion            # 2. ingestion (+ migrate)
@@ -171,7 +335,7 @@ make -C terraform ui-deploy ENV=dev                         # 6. build and uploa
 make -C terraform ui-url ENV=dev                            # the URL to open
 ```
 
-**3. Ship a code change.** Rebuild only what changed, then deploy that stack:
+**3. Ship a code change.** Rebuild (`make -C terraform build`, or only what changed), then deploy that stack. A change to `services/common` reaches every Python service: rebuild and deploy all three.
 
 ```bash
 services/ingestion/scripts/build_lambda.sh all && make -C terraform deploy ENV=dev STACK=ingestion
@@ -212,12 +376,16 @@ make -C terraform destroy-all ENV=dev                       # ui, ingestion, pro
 make -C terraform destroy ENV=dev STACK=ui                  # one stack only
 ```
 
-**8. Before every commit** (no AWS access needed):
+**8. Before every commit** (no AWS access needed; CI is disabled):
 
 ```bash
 make -C terraform check                                     # fmt, validate, tests, script tests, tflint, checkov
 terraform -chdir=terraform fmt -recursive                   # fix formatting
+(cd services/ingestion && uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest)
+(cd services/ui/web && npm run typecheck && npm test && npm run build)
 ```
+
+The same Python checks apply to `services/common`, `services/producer` and `services/ui/bff`. The ingestion integration tests need Docker (testcontainers) or `INGEST_TEST_PG_URL` pointing at a PostgreSQL server with pgvector.
 
 ## Bootstrap (once per account)
 
@@ -229,17 +397,19 @@ terraform -chdir=terraform fmt -recursive                   # fix formatting
 
 It has no make target: an account admin applies it by hand, once per account, and again whenever it changes, always before the stacks. Details: [bootstrap README](../terraform/bootstrap/README.md), [AWS_ACCESS.md](AWS_ACCESS.md#one-time-setup).
 
-**1. Check the inputs.** In [`terraform/bootstrap/terraform.tfvars`](../terraform/bootstrap/terraform.tfvars):
+**1. Check the inputs.** [`terraform/bootstrap/terraform.tfvars`](../terraform/bootstrap/terraform.tfvars) holds only `mandatory_tags` (the organization's tag values). The region, the account and the people come from the environment:
 
-| Setting | What to check |
+| Setting | From |
 |---|---|
-| `region` | The state bucket's region. It must equal `region` in every `terraform/envs/<env>/<stack>.s3.tfbackend`: the Makefile builds the bucket name `entingestion-tfstate-<account>-<region>` from that line |
-| `mandatory_tags` | The organization's tag values |
+| `region` | `TF_VAR_region`: the state bucket's (and trail bucket's) region. The stacks find the bucket through `STATE_REGION` (default `AWS_REGION`), which must equal it. An account bootstrapped in `us-east-1` needs `STATE_REGION=us-east-1` for every `make` target, even when its stacks run in `us-west-2` |
+| `aws_account_id` | `TF_VAR_aws_account_id` |
+| `deploy_principal_arns` | `TF_VAR_deploy_principal_arns` |
 
-**2. Apply,** as an admin of the account, with the account from the environment:
+**2. Apply,** as an admin of the account, with the account and region from the environment:
 
 ```bash
 export AWS_ACCOUNT_ID=<12-digit account> TF_VAR_aws_account_id=<same 12 digits>
+export AWS_REGION=<state region> TF_VAR_region=<same region>  # later: STATE_REGION=<same region> if AWS_REGION differs
 export AWS_PROFILE=<an admin profile for that account>        # e.g. entingestion after aws login
 aws sts get-caller-identity --query Arn --output text         # you, in $AWS_ACCOUNT_ID
 export TF_VAR_deploy_principal_arns='["user/<you>"]'          # the people; you must be one of them
@@ -276,8 +446,9 @@ make -C terraform whoami ENV=dev
 ```bash
 cd terraform/bootstrap
 terraform init -migrate-state -backend-config=bootstrap.s3.tfbackend \
-  -backend-config=bucket=entingestion-tfstate-$AWS_ACCOUNT_ID-<region> \
-  -backend-config=kms_key_id=arn:aws:kms:<region>:$AWS_ACCOUNT_ID:alias/entingestion-tfstate
+  -backend-config=region=$TF_VAR_region \
+  -backend-config=bucket=entingestion-tfstate-$AWS_ACCOUNT_ID-$TF_VAR_region \
+  -backend-config=kms_key_id=arn:aws:kms:$TF_VAR_region:$AWS_ACCOUNT_ID:alias/entingestion-tfstate
 terraform state list                                           # then delete the local terraform.tfstate*
 ```
 
@@ -288,8 +459,9 @@ terraform state list                                           # then delete the
 The backends set `kms_key_id` to the state key (`alias/entingestion-tfstate`; the Makefile passes it from `AWS_ACCOUNT_ID`), and the state bucket policy refuses any other encryption header. Objects written before that are SSE-S3. Re-encrypt each one in place once, as an admin (the deploy roles can't read the bootstrap state):
 
 ```bash
-BUCKET=entingestion-tfstate-$AWS_ACCOUNT_ID-us-west-2
-KEY=arn:aws:kms:us-west-2:$AWS_ACCOUNT_ID:alias/entingestion-tfstate
+STATE_REGION=${STATE_REGION:-$AWS_REGION}                     # the bootstrap's region
+BUCKET=entingestion-tfstate-$AWS_ACCOUNT_ID-$STATE_REGION
+KEY=arn:aws:kms:$STATE_REGION:$AWS_ACCOUNT_ID:alias/entingestion-tfstate
 for k in dev/producer dev/ingestion dev/ui prod/producer prod/ingestion prod/ui bootstrap; do
   aws s3api head-object --bucket $BUCKET --key $k/terraform.tfstate >/dev/null 2>&1 || continue
   aws s3 cp s3://$BUCKET/$k/terraform.tfstate s3://$BUCKET/$k/terraform.tfstate \
@@ -300,13 +472,105 @@ aws s3api head-object --bucket $BUCKET --key dev/ingestion/terraform.tfstate --q
 
 `make init` already runs `terraform init -reconfigure`, so the next `make plan` picks up the new backend settings. Older versions of each object stay SSE-S3 until the lifecycle rule expires them (90 days).
 
+## Configuration
+
+Nothing account-, region- or model-specific is tracked in the code. Each value has one source:
+
+| Value | Source |
+|---|---|
+| Account | `AWS_ACCOUNT_ID` (Makefile → `TF_VAR_aws_account_id`) |
+| State bucket region | `STATE_REGION` (default `AWS_REGION`), equal to the bootstrap's `TF_VAR_region` |
+| Stacks' region and mandatory tags | `terraform/envs/<env>/common.tfvars` (`region`, `mandatory_tags`) |
+| Everything else per environment | `terraform/envs/<env>/<stack>.tfvars` |
+| Function environment variables | Set by Terraform from those tfvars; tunables have code defaults (below) |
+| Names in operator scripts | Terraform outputs of the stack (`services/ingestion/scripts/_tf.py`), never a naming convention |
+
+### Terraform variables
+
+- **`envs/<env>/common.tfvars`** holds `region` and `mandatory_tags` for every stack of the environment. The Makefile passes it as the first `-var-file`, before `envs/<env>/<stack>.tfvars`, which may override a value. `make plan`, `make destroy` and `teardown.py` all use both.
+- **Set only in the tfvars** (no default in `variables.tf`, so a plan fails without them):
+  - ingestion: `embedding_profiles`, `default_profile` (must name one of them), `rerank_model_id`, `backup_copy_region`;
+  - producer: `backup_copy_region`.
+
+  `backup_copy_region` is `null` where `backup_enabled = false` (dev).
+- **`producer_ssm_prefix`** (ingestion) is derived as `<ssm_prefix>/<env>/producer` (`/entingestion/<env>/producer`); set it only to read another producer.
+- **Dispatcher:** `dispatcher_timeout` (60 s; the ingest and backfill queues' visibility timeout is 6 times it) and `slot_wait_seconds` (40, below `dispatcher_timeout`; `SLOT_WAIT_SECONDS` on the function), next to `live_slots` and `backfill_slots`.
+
+### Service environment variables
+
+Terraform sets the names, ARNs and URLs. The rest are tunables with these code defaults (each service's `config.py`), which an environment variable on the function overrides.
+
+**Ingestion** (`services/ingestion/src/ingest/config.py`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EMBEDDING_PROFILES` | required | JSON: profile name → model (from the tfvars `embedding_profiles`). No built-in profiles |
+| `DEFAULT_PROFILE` | required | The default registry's first profile (from `default_profile`) |
+| `ACCESS_CACHE_SECONDS` | `300` | How long the producer's `source_access` is cached |
+| `DB_STATEMENT_TIMEOUT_MS` | `30000` | PostgreSQL statement timeout |
+| `DB_CONNECT_TIMEOUT_SECONDS` | `30` | Connect timeout (IAM-token checks on a small instance are slow when cold) |
+| `SEARCH_RRF_K` | `60` | Reciprocal rank fusion constant |
+| `SEARCH_MIN_POOL` | `50` | Minimum candidates per list (vector, keyword) |
+| `SEARCH_MIN_EF_SEARCH`, `SEARCH_MAX_EF_SEARCH` | `100`, `1000` | Bounds of `hnsw.ef_search` (twice the candidates) |
+| `SEARCH_RERANK_POOL` | `2` | Candidates per wanted result when reranking |
+| `SEARCH_MAX_CANDIDATES` | `100` | At most this many candidates to rerank |
+| `SEARCH_RERANK_TEXT_CHARS` | `4000` | Characters of each candidate sent to the reranker |
+| `DISPATCH_SLOT_POLL_SECONDS` | `2.0` | How often a waiting dispatcher re-checks for a free slot |
+| `DISPATCH_BUSY_VISIBILITY_SECONDS` | `30` | When a record that found no slot is visible again |
+| `RETRY_MAX_RETRYABLE` | `5` | Failed runs before a transient failure becomes permanent |
+| `RETRY_MAX_THROTTLED` | `20` | The same, for throttling |
+| `RETRY_BASE_SECONDS` | `900` | Retry after base x 2^n |
+| `RETRY_THROTTLE_SECONDS` | `300` | Throttled: retry after base x 2^min(n, 3) |
+| `RECONCILE_MAX_RETRIES` | `5` | The reconciler escalates FAILED_RETRYABLE after this many retries |
+| `RECONCILE_STAGED_GRACE_SECONDS` | `1800` | STAGED this long is re-indexed |
+| `RECONCILE_STREAM_GRACE_SECONDS` | `300` | A producer update younger than this may still be in the Pipe |
+| `ALLOW_TRUNCATE` | `false` | `migrate`'s truncate action (tfvars `allow_truncate`; `false` in prod) |
+| `OCR_ENABLED` | `false` | Textract OCR (tfvars `ocr_enabled`) |
+
+The others (`LIVE_SLOTS`, `SLOT_WAIT_SECONDS`, `CHUNK_*`, `EVAL_*`, `PII_*`, `RERANK_*`, `*_TTL_DAYS`, `LEASE_SECONDS`) are in `config.py` with their defaults.
+
+**Ingestion scripts** (`services/ingestion/scripts`):
+
+| Variable | Default | Used by |
+|---|---|---|
+| `ENV` | `dev` | Every script's `--env` default (which Terraform workspace, `.terraform/<env>`, the outputs come from) |
+| `GOLDEN_MODEL_ID` | required (or `--model`) | `make_golden_set.py`: the Bedrock text model that writes the questions |
+| `ACCEPTANCE_SOURCE` | `acceptance` | `acceptance*.py`, `load_test.py`: the producer source they write |
+| `GATE_SOURCE` | `gate1k` | `gate_phase1.py` (or `--source`) |
+
+**Producer** (`services/producer/src/producer/config.py`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IDEMPOTENCY_TABLE` | required by the api | The Powertools idempotency table for `Idempotency-Key` |
+| `REGISTRAR_QUEUE_URL` | required by the janitor | Where lost S3 events are re-sent |
+| `OPEN_PROCESS_IDLE_DAYS` | `7` | The janitor closes OPEN processes untouched this long |
+| `UPLOAD_ROW_TTL_DAYS` | `15` | Upload rows outlive the registrar DLQ (14 days) |
+| `FINISHED_UPLOAD_TTL_DAYS` | `30` | How long an upload with an outcome stays listed |
+| `TICKET_GRACE_SECONDS` | `3600` | A PUT may still be finishing this long after its URL expired |
+| `JANITOR_BATCH` | `500` | Expired tickets the janitor settles per run |
+
+**UI backend (BFF)** (`services/ui/bff/src/bff/config.py`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PRODUCER_API_URL`, `CONTROL_API_URL` | required | The two APIs' stage invoke URLs (the ui stack reads them from SSM); the function fails on its first call without them |
+| `MAX_RERUN_IDS` | `100` | Most `article_ids` per Operations re-run |
+| `MAX_REDRIVE` | `200` | Largest DLQ redrive `max` |
+| `CONNECT_TIMEOUT` | `3.0` | Upstream connect timeout, seconds |
+| `READ_TIMEOUT` | `25.0` | Upstream read timeout, seconds. Keep it below the Lambda timeout (29 s; CloudFront gives the origin 30 s) |
+
+### Bruno
+
+The environments read every deploy-specific value from the shell ([bruno/README.md](../bruno/README.md)): `PRODUCER_URL`, `INGESTION_URL` (the stacks' `api_url` and `control_api_url` outputs), `AWS_REGION`, `AWS_PROFILE`, `BRUNO_SOURCE` (a source you write), `BRUNO_TENANT` (a tenant you may search), `LIVE_TABLE` and `NEW_TABLE` (the tables the model-change requests use). Request bodies never name a table.
+
 ## Calling the control API
 
 The API uses IAM auth. Attach the output `control_api_reader_policy_arn` (GET routes), `control_api_search_policy_arn` (`POST /v1/search` only) or `control_api_operator_policy_arn` (all routes) to your role, then sign requests with [awscurl](https://github.com/okigan/awscurl) (MIT):
 
 ```bash
 API=$(make -sC terraform output ENV=<env> STACK=ingestion | awk -F'"' '/^control_api_url/{print $2}')
-call() { uvx awscurl --service execute-api --region us-west-2 "$@"; }
+call() { uvx awscurl --service execute-api --region "$AWS_REGION" "$@"; }    # the stacks' region
 
 call "$API/v1/tables"
 call -X POST -d '{"article_ids": ["art_..."], "dry_run": true}' "$API/v1/ingest"
@@ -333,7 +597,7 @@ Dev runs on the AWS free plan, which limits what it can test. Before the first a
 
 1. **Account plan:** a paid plan. The free plan has no Aurora (only "express" clusters Terraform can't create), no RDS Proxy and no Textract.
 2. **Lambda concurrency:** raise the account quota (Service Quotas → Lambda → Concurrent executions) from 10 to at least 1,000. Prod reserves 4 for Embed, and AWS keeps 100 unreserved. With 10, a reindex also starves the control API: API Gateway returns 500 without invoking the function.
-3. **Bedrock model access** in the region: `amazon.titan-embed-text-v2:0` (embeddings), the model of every other `bedrock` embedding profile (for example `cohere.embed-multilingual-v3`), and `amazon.nova-lite-v1:0` (only for writing the synthetic golden set).
+3. **Bedrock model access** in the region: the model of every `bedrock` profile in `embedding_profiles` (`envs/<env>/ingestion.tfvars`), `rerank_model_id` if `rerank_enabled`, and the text model you pass to `make_golden_set.py` (`--model` or `GOLDEN_MODEL_ID`; only for writing the synthetic golden set).
 4. **Producer** deployed to the same env. Ingestion reads its SSM parameters under `/entingestion/<env>/producer/`.
 5. **Alarm emails:** set `alarm_emails` in `terraform/envs/prod/ingestion.tfvars` and `producer.tfvars`. Each address confirms by email. **A prod plan fails without one** (variable validation: alarms nobody receives are worse than none). The prod tfvars still have `alarm_emails = []` on purpose while alerting is parked, so `make plan ENV=prod` stops there until an address is set.
 6. **AWS Backup for DynamoDB:** prod has `backup_enabled = true`. Turn on AWS Backup's advanced features for DynamoDB once per account and region, or the cross-region copies of the tables fail: `aws backup update-region-settings --resource-type-management-preference DynamoDB=true` (and opt in to DynamoDB under `--resource-type-opt-in-preference`).
@@ -348,13 +612,14 @@ make -C terraform deploy ENV=<env> STACK=ingestion               # plan, confirm
 
 Review the plan before you confirm: no data store is replaced or destroyed. `deploy` applies first and runs `migrate` right after. That order is safe because **migrations are expand-only**: they add tables, columns and indexes and never drop or rename what running code reads, so old code runs against the new schema. New code that reaches a table or column before its migration has run fails `E_DB_SCHEMA`, which is retried (the run ends FAILED_RETRYABLE and the reconciler re-queues it), so a late or failed migrate costs latency, not articles. To remove something, stop reading it in one release and drop it in a later one (expand, then contract). `make migrate ENV=<env>` repeats safely.
 
-**Versions and aliases.** Every code or configuration change publishes a new version of each changed function, and the apply moves its `live` alias to it. The state machines, event source mappings, schedules, both APIs and the in-function calls (`query`, `tables`) all invoke `live`, so [a rollback](#roll-back-a-bad-deploy) is one alias update. The first apply with aliases (M5) publishes version 1 of every function, re-points the event source mappings in place (same UUID) and replaces the API Gateway invoke permissions; expect a few 5xx from the APIs during that apply.
+**Versions and aliases.** Every code or configuration change publishes a new version of each changed function, and the apply moves its `live` alias to it. The state machines, event source mappings, schedules, both APIs and the in-function calls (`query`, `tables`) all invoke `live`, so [a rollback](#roll-back-a-bad-deploy) is one alias update.
 
-Migration 004 creates `ingest_ops`, which the `tables` function uses for `GET /v1/tables` and `POST /v1/tables/active`; until it has run, those routes fail.
+**What migrate does.** It runs as the master user and is idempotent:
+1. the migrations in `services/ingestion/db/migrations` (today one, `001_schema.sql`: the pgvector extension, the database roles, `article_tombstones` and `profile_tables`);
+2. a table for every embedding profile that has none, generated from the profile (`chunks_<profile>`, with its dimension, indexes, row-level security and grants); it fails if a table exists with another dimension;
+3. `chunks_active` recreated over the default registry's live table, read from DynamoDB (`#CONFIG` items only, through the gateway endpoint), so a rebuilt database serves the same table as the registry. Before any switch has recorded one: the table it already serves, or on a new database the default profile's table. A registry read that fails stops migrate; a live table without a profile is refused.
 
-**Migrations 005 and 006** (tenants and row-level security; weighted `content_tsv`, `parent_text`, citation offsets) must run right after the apply that ships them: until then Index fails on the new columns (`E_DB_SCHEMA`: runs end FAILED_RETRYABLE and the reconciler re-queues them), and search, evaluation and the drift check see nothing for tenants without a setting. 006 rewrites both chunk tables (generated column) under a lock: run it in a quiet window, with ingestion paused (see [Pause and resume ingestion](#pause-and-resume-ingestion)) if the tables are large. The first update of each article afterwards may be a metadata refresh (no fingerprint stored yet), and every embedding is fetched once more from Bedrock (new cache key).
-
-**Embedding profiles** (migration 007 and the profile tables). With the default `embedding_profiles` nothing changes: the first migrate records `chunks_primary` and `chunks_compact` in `profile_tables` and creates no table (`"profile_tables_created": []`). A new profile's table is created by the migrate step of the deploy that adds it. Until then, deletes (which reach every profile's table) fail `E_DB_SCHEMA` and are retried, so run migrate right after the apply, as `deploy` does.
+It returns `{"applied": [...], "profile_tables_created": [...], "active_table": "..."}`. A new profile's table is created by the migrate step of the deploy that adds it. Until then, deletes (which reach every profile's table) fail `E_DB_SCHEMA` and are retried, so run migrate right after the apply, as `deploy` does.
 
 The zips are uploaded to the stack's artifacts bucket (they exceed Lambda's 50 MB direct upload). Each published version keeps its own copy of the code (counted against the regional 75 GB code storage); delete old versions now and then (`aws lambda delete-function --function-name <fn> --qualifier <n>`, never the one `live` points at).
 
@@ -440,7 +705,6 @@ In the upload UI: **Operations → Failed & stuck** lists them by status, with r
 | `E_UPSTREAM_4XX` | permanent | An `openai_compatible` embedding endpoint refused the request (bad model name, API key or input) | Fix the profile or the secret, apply, then redrive `E_UPSTREAM_4XX` |
 | `E_DB_CONN`, `E_DB_CONFLICT` | transient | Database connection or lock conflict | Retried automatically; if persistent, check the database panels |
 | `E_DB_SCHEMA` | transient | A table or column the code needs doesn't exist: the code is ahead of the migrations | `make -C terraform migrate ENV=<env>`; the runs recover on their next retry |
-| `E_LEASE_BUSY` | transient | Two claims raced for one article in the same instant | Retried. (A delete that finds a run going no longer fails: it marks the article, and the run hands over.) |
 | `E_SOURCE_MISSING` | permanent | The producer object is gone | Re-upload through the producer |
 | `E_SOURCE_CHANGED` | permanent | The object's checksum no longer matches the producer row | Re-upload through the producer |
 | `E_UNREADABLE` | permanent | Corrupt or encrypted file | Fix the file and re-upload, or accept it |
@@ -529,7 +793,7 @@ Each embedding profile has its own table (`embedding_profiles` in the tfvars; `m
    cd services/ingestion
    uv run python scripts/evaluate.py --env <env> --table chunks_compact --baseline --min-recall10 0.9
    ```
-   Scores are chunk-level (recall@5/@10, nDCG@10, MRR, with 95% CIs) plus article recall@10. The article-level baseline on dev (2026-10-11, 46 synthetic questions over 23 articles): `chunks_primary` recall@5 1.00, recall@10 1.00, MRR 0.877; `chunks_compact` 1.00 / 1.00 / 0.888. Each report goes to `_eval/<table>/` in staging, with the questions that missed.
+   Scores are chunk-level (recall@5/@10, nDCG@10, MRR, with 95% CIs) plus article recall@10. Each report goes to `_eval/<table>/` in staging, with the questions that missed.
 3. **Switch:** `call -X POST -d '{"table": "chunks_compact"}' "$API/v1/tables/active"`. The **evaluation gate** refuses (409, `"gate": "evaluation"`) unless the table's newest report is under `eval_max_age_days` (7) old and its recall@10 is at most `eval_tolerance` (0.02) below the live table's on the same golden set. The 409 says which; re-run step 2.
 4. **Roll back:** the same call with the old table, usually with `"force": true` (its report is likely older than 7 days). Nothing is deleted, so you can switch back and forth.
 
@@ -539,14 +803,14 @@ Each embedding profile has its own table (`embedding_profiles` in the tfvars; `m
 
 The table status and switch run in the `tables` function as the database user `ingest_ops`, never with the master credentials. `ingest_ops` can read the vector tables and replace the `chunks_active` view (owned by `ingest_views`), but can't write rows.
 
-**Golden set.** `scripts/make_golden_set.py --env <env>` writes a new set of synthetic questions to `_eval/golden/<YYYYMMDD-HHMM>.jsonl` in staging (never overwriting one) and points `_eval/golden/LATEST` at it, using Nova Lite on chunks sampled across each document, plus `--no-answer` questions. Each line is `{"id", "question", "article_id", "doc_version", "chunk_ids", "no_answer"}`. Replace it with real user questions when you have them: a new file in the same format, then update `LATEST`. Questions whose article was deleted or re-versioned are dropped by the eval (and counted in the report): make a new set after large content changes. The old `_eval/golden.jsonl` (article ids only) is still read when there's no `LATEST`.
+**Golden set.** `scripts/make_golden_set.py --env <env> --model <bedrock text model id>` (or `GOLDEN_MODEL_ID`; required, any model the Converse API serves and the account has access to) writes a new set of synthetic questions to `_eval/golden/<YYYYMMDD-HHMM>.jsonl` in staging (never overwriting one) and points `_eval/golden/LATEST` at it, from chunks sampled across each document, plus `--no-answer` questions. Each line is `{"id", "question", "article_id", "doc_version", "chunk_ids", "no_answer"}`. Replace it with real user questions when you have them: a new file in the same format, then update `LATEST`. Questions whose article was deleted or re-versioned are dropped by the eval (and counted in the report): make a new set after large content changes. Without `LATEST` the eval fails.
 
 ## Add a model
 
 A model is an embedding profile (docs/ARCHITECTURE.md "Embedding models"); its table is `chunks_<name>`.
 
 1. **Model access.** For a Bedrock model, enable it in the Bedrock console (Model access) in the region. For an `openai_compatible` endpoint, store its API key in Secrets Manager (a plain string, or JSON `{"api_key": "..."}`); the endpoint must be reachable from the internet over HTTPS.
-2. **Add the profile** to `embedding_profiles` in `terraform/envs/<env>/ingestion.tfvars`, keeping the existing ones (the default block is in the comments there), e.g.
+2. **Add the profile** to `embedding_profiles` in `terraform/envs/<env>/ingestion.tfvars`, keeping the existing ones (that file is the only place models are named; the stack has no default), e.g.
    ```hcl
    multilingual = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
    ```
@@ -579,11 +843,11 @@ If an article's producer row moves to a tenant whose registry writes other table
 ## Retrieval switches
 
 All off by default (paid, or unavailable on the free plan). Set them in the env tfvars and apply:
-- **`rerank_enabled`:** `POST /v1/search` with `"rerank": true` reranks with Bedrock `rerank_model_id` (`amazon.rerank-v1:0`; enable model access first). Billed per query. If reranking fails, results come back in the fused order with `"reranked": false` and the `RerankFailed` metric.
+- **`rerank_enabled`:** `POST /v1/search` with `"rerank": true` reranks with the Bedrock model `rerank_model_id` (required in the env tfvars, no default; enable model access first). It asks for `SEARCH_RERANK_POOL` (2) candidates per result, at most `SEARCH_MAX_CANDIDATES` (100), and sends each one's first `SEARCH_RERANK_TEXT_CHARS` (4000) characters. Billed per query. If reranking fails, results come back in the fused order with `"reranked": false` and the `RerankFailed` metric.
 - **`pii_screening`:** Normalize screens every new version with Comprehend `DetectPiiEntities` (`pii_min_score`, 0.8) and applies each source's `pii` in the producer's `source_access` (`block`, `redact`, `allow`; default `allow`), so set those in the producer tfvars first. Blocked articles end SKIPPED with `E_PII_BLOCKED`; LATEST shows `pii_count`, `pii_types`, `pii_action`. Articles indexed before it was on aren't screened until they're re-run (`POST /v1/reindex` from `EMBED` doesn't re-normalize: use `POST /v1/ingest` with `force`).
 - **`parent_child_enabled`:** smaller chunks matched, section text returned as `context`. It changes every chunk: bump `pipeline_version` (every article re-runs on its next update) or force a re-run.
 
-Searching needs the producer's `source_access` to list the searching role as a reader (or writer) of the tenant's sources; the control API re-reads it at most every 5 minutes.
+Searching needs the producer's `source_access` to list the searching role as a reader (or writer) of the tenant's sources; the control API re-reads it at most every `ACCESS_CACHE_SECONDS` (300).
 
 ## OCR switch
 
@@ -662,7 +926,7 @@ The hosted upload and tracking page; design, security model and first-time setup
 ## Tear down a disposable environment
 
 ```bash
-export AWS_ACCOUNT_ID=<12-digit account> ALLOW_AMBIENT=1 AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2
+export AWS_ACCOUNT_ID=<12-digit account> ALLOW_AMBIENT=1 AWS_REGION=<region> AWS_DEFAULT_REGION=<region>
 make -C terraform destroy-all ENV=dev DRY_RUN=1         # preflight + what would be deleted; changes nothing
 make -C terraform destroy-all ENV=dev                   # ui, ingestion, then producer; confirm each by typing the env name
 make -C terraform destroy ENV=dev STACK=ingestion       # one stack only
@@ -673,7 +937,7 @@ make -C terraform destroy ENV=dev STACK=ingestion       # one stack only
 1. **Preflight, changing nothing.** It refuses prod. It also stops if any data store still has a prod setting: deletion protection on a table, cluster or instance, or `force_destroy` off on a bucket. These would make the destroy fail half way.
 2. **Confirm.** It lists the Aurora clusters and tables it will delete, and you type the env name. Without a terminal (CI, a pipe) it never proceeds.
 3. **Aurora** (`database_mode = "aurora"`). It deletes the cluster's instances, then the cluster, and waits. The cluster carries `prevent_destroy`, and its subnet, security and parameter groups can't be deleted while it exists. Add `FINAL_SNAPSHOT=1` to keep a snapshot (`<cluster>-teardown-<time>`).
-4. **Terraform.** It removes the protected resources from state and runs `terraform destroy`. With functions in the VPC this can take 20–40 minutes: AWS releases Lambda network interfaces slowly, and Terraform waits for them before deleting the security groups and subnets.
+4. **Terraform.** It removes the protected resources from state and runs `terraform destroy` with every `--var-file` it was given (the Makefile passes `common.tfvars`, then `<stack>.tfvars`). With functions in the VPC this can take 20–40 minutes: AWS releases Lambda network interfaces slowly, and Terraform waits for them before deleting the security groups and subnets.
 5. **Tables.** It deletes the DynamoDB tables (they carry `prevent_destroy`) with the AWS CLI and waits.
 
 **Resume.** If a step fails (a timeout, a throttle, an expired session), fix the cause and rerun the same command. Before anything leaves the state, the script records the protected resources in `stacks/<stack>/.terraform/<env>/teardown-pending.json`. A rerun therefore still deletes them, and skips whatever is already gone.
@@ -686,7 +950,7 @@ make -C terraform destroy ENV=dev STACK=ingestion       # one stack only
 |---|---|---|
 | `DeleteConflict: Cannot delete a policy attached to entities` on an IAM policy such as `producer-api-invoke-<env>` | Someone attached a policy this stack created to a user or role outside Terraform, for example to your user for Bruno or awscurl | Find what holds it: `aws iam list-entities-for-policy --policy-arn <arn>`. Detach it with `aws iam detach-user-policy --user-name <user> --policy-arn <arn>` (or `detach-role-policy`), then rerun |
 | `SSL validation failed … CERTIFICATE_VERIFY_FAILED … unable to get local issuer certificate` | A TLS-inspecting proxy (Zscaler) on your network; see [Behind a TLS-inspecting proxy](#behind-a-tls-inspecting-proxy-zscaler) | Set `AWS_CA_BUNDLE`, then rerun |
-| A table or bucket "not found" while you can see it in the console | The AWS CLI is using a different region: `[default]` in `~/.aws/config` is `us-east-1` | `export AWS_DEFAULT_REGION=us-west-2 AWS_REGION=us-west-2`, then rerun |
+| A table or bucket "not found" while you can see it in the console | The AWS CLI or boto3 is using a different region (`[default]` in `~/.aws/config`) | `export AWS_REGION=<region> AWS_DEFAULT_REGION=<region>` (the stacks' region from `common.tfvars`), then rerun |
 | `Expected role entingestion-dev-deploy, got …:user/…` | The deploy roles aren't in use yet | Add `ALLOW_AMBIENT=1`; see [Credentials](#credentials) |
 
 **What remains afterwards, by design:**

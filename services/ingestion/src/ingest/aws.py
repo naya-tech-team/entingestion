@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from mypy_boto3_stepfunctions.client import SFNClient
     from mypy_boto3_textract.client import TextractClient
 
-# Timeouts on every external call (brief §17); SDK retries are short because Step Functions
+# Timeouts on every external call; SDK retries are short because Step Functions
 # retries at the step level with backoff.
 _DEFAULT = Config(
     connect_timeout=5, read_timeout=30, retries={"mode": "standard", "max_attempts": 3}

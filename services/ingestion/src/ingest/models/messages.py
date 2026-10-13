@@ -1,4 +1,4 @@
-"""Queue message for the ingest and backfill queues (brief §4.2)."""
+"""Queue message for the ingest and backfill queues."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class IngestMessage(BaseModel):
     meta_sha256: str | None = None
     title_sha256: str | None = None
     # The producer row's updated_at. Distinguishes re-registrations and PATCHes of unchanged
-    # content (each is its own run, brief UC3) and feeds the freshness-lag metric.
+    # content (each is its own run, docs/USE_CASES.md UC3) and feeds the freshness-lag metric.
     source_updated_at: str | None = None
     trigger: Trigger
     requested_by: str | None = None
@@ -40,7 +40,7 @@ class IngestMessage(BaseModel):
     # The producer row's tenant: picks the tenant's vector-table registry (which tables a live
     # run writes, ingest.vectorstore.registry). None = the default registry.
     tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
-    # Reindex into another vector table (brief §7.3); None = the configured live table.
+    # Reindex into another vector table; None = the configured live table.
     target_table: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,62}$")
 
     @field_validator("content_sha256", "meta_sha256", "title_sha256")

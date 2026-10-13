@@ -1,4 +1,4 @@
-# Lambda functions (brief §8.3). Two packages: core and docs (services/ingestion/scripts/build_lambda.sh).
+# Lambda functions. Two packages: core and docs (services/ingestion/scripts/build_lambda.sh).
 
 # Both zips are over the 50 MB direct-upload limit, so Lambda reads them from S3.
 module "artifacts" {
@@ -63,7 +63,7 @@ locals {
   # name => settings. vpc: which security group, if the function runs in the VPC. Every
   # function gets the embedding profiles (embedding.tf) with common_env.
   functions = {
-    dispatcher      = { handler = "ingest.dispatcher.handler", package = "core", memory = 256, timeout = local.dispatcher_timeout, reserved = var.dispatcher_reserved_concurrency, vpc = null, env = local.dispatcher_env }
+    dispatcher      = { handler = "ingest.dispatcher.handler", package = "core", memory = 256, timeout = var.dispatcher_timeout, reserved = var.dispatcher_reserved_concurrency, vpc = null, env = local.dispatcher_env }
     claim           = { handler = "ingest.steps.claim.handler", package = "core", memory = 256, timeout = 30, reserved = null, vpc = null, env = {} }
     fetch           = { handler = "ingest.steps.fetch.handler", package = "core", memory = 1024, timeout = 300, reserved = null, vpc = null, env = {} }
     extract         = { handler = "ingest.steps.extract.handler", package = "docs", memory = 2048, timeout = 900, reserved = null, vpc = null, env = {} }
@@ -97,6 +97,7 @@ locals {
   live_slots = coalesce(var.live_slots, var.embed_reserved_concurrency == null ? 8 : 2 * var.embed_reserved_concurrency)
   dispatcher_env = {
     STATE_MACHINE_ARN  = local.state_machine_arn
+    SLOT_WAIT_SECONDS  = tostring(var.slot_wait_seconds)
     LIVE_SLOTS         = tostring(local.live_slots)
     BACKFILL_SLOTS     = tostring(var.backfill_slots)
     BACKFILL_QUEUE_ARN = module.backfill_queue.queue_arn

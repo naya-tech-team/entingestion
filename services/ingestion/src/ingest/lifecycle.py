@@ -1,4 +1,4 @@
-"""What a deleted article leaves behind, and old versions' staged files (review M3.5).
+"""What a deleted article leaves behind, and old versions' staged files.
 
 Delete (the Index step of a delete run): after the rows are gone, the article's embedding-cache
 entries (keys from its last staged chunks, for every vector table) and every staged object
@@ -47,7 +47,9 @@ def purge_cache(keys: list[str]) -> int:
     if not keys:
         return 0
     settings = get_settings()
-    cache = EmbeddingCache(aws.dynamodb(), aws.table(settings.cache_table), settings.cache_ttl_days)
+    cache = EmbeddingCache(
+        aws.dynamodb(), aws.table(settings.cache_table), settings.retention.cache_ttl_days
+    )
     cache.delete_many(keys)
     return len(keys)
 

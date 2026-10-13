@@ -1,5 +1,5 @@
 {
-  "Comment": "Ingest one article version (brief §4). Steps follow the §6.3 write protocol. A run that outlives TimeoutSeconds times out (alarm runs-timing-out); its lease expires and the reconciler resumes the article.",
+  "Comment": "Ingest one article version: Claim, then each step writes its staged output and records it on the run. A run that outlives TimeoutSeconds times out (alarm runs-timing-out); its lease expires and the reconciler resumes the article.",
   "StartAt": "Claim",
   "TimeoutSeconds": ${execution_timeout},
   "States": {
@@ -864,7 +864,7 @@
     },
     "MarkFailed": {
       "Type": "Task",
-      "Comment": "Skip, retryable or permanent failure (brief §6.3 step 5).",
+      "Comment": "The Catch target: records the run as SKIPPED, FAILED_RETRYABLE (the reconciler re-queues it) or FAILED_PERMANENT.",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
         "FunctionName": "${mark_failed_arn}",

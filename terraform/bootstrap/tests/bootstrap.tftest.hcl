@@ -78,6 +78,32 @@ run "deploy_principals_relative_to_the_account_get_its_arn" {
   }
 }
 
+run "workload_boundaries_are_named_like_the_stacks_expect" {
+  command = plan
+
+  assert {
+    condition = (
+      local.workload_boundary_arns == {
+        dev  = "arn:aws:iam::123456789012:policy/entingestion-dev-workload-boundary"
+        prod = "arn:aws:iam::123456789012:policy/entingestion-prod-workload-boundary"
+      }
+      && aws_iam_policy.workload_boundary["dev"].name == "entingestion-dev-workload-boundary"
+      && aws_iam_policy.workload_boundary["prod"].name == "entingestion-prod-workload-boundary"
+    )
+    error_message = "Each environment's workload boundary is the one its stacks set on their roles (modules/stack_common)."
+  }
+}
+
+run "the_region_comes_from_the_environment" {
+  command = plan
+
+  variables {
+    region = "west"
+  }
+
+  expect_failures = [var.region]
+}
+
 run "refuses_to_lock_the_applying_admin_out_of_the_state" {
   command = plan
 

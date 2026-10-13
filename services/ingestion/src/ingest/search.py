@@ -4,7 +4,7 @@
    the default one); embed the query with that table's embedding profile (as a query),
 2. the query function (inside the VPC, ingest_reader, one tenant by row-level security) returns
    the fused vector + keyword candidates from that table (query.search_hybrid),
-3. optionally Bedrock reranks them (amazon.rerank-v1:0, RERANK_ENABLED, off by default); on any
+3. optionally Bedrock reranks them (RERANK_ENABLED, off by default; RERANK_MODEL_ARN); on any
    rerank error the fused order stands.
 
 Authorization (who may search which tenant) is the caller's job: control_api checks it against
@@ -28,10 +28,6 @@ from ingest.vectorstore.targets import target
 logger = Logger()
 metrics = Metrics()
 
-RERANK_POOL = 2  # candidates per wanted result when reranking
-MAX_CANDIDATES = 100  # the query function's search_hybrid limit
-RERANK_TEXT_CHARS = 4000  # per candidate sent to the reranker
-
 
 def call_query(payload: dict[str, Any]) -> dict[str, Any]:
     """Invoke the query function (inside the VPC)."""
@@ -50,8 +46,9 @@ def search(
     settings = get_settings()
     live = target(registry.load(aws.status_store(), tenant_id).live)
     vector = make_embedder(live.profile).embed_query(query).vector
-    use_rerank = rerank and settings.rerank_enabled
-    candidates = min(k * RERANK_POOL, MAX_CANDIDATES) if use_rerank else k
+    use_rerank = rerank and settings.search.rerank_enabled
+    knobs = settings.search
+    candidates = min(k * knobs.rerank_pool, knobs.max_candidates) if use_rerank else k
     hits: list[dict[str, Any]] = call_query(
         {
             "action": "search_hybrid",
@@ -76,6 +73,7 @@ def search(
 
 def rerank_hits(query: str, hits: list[dict[str, Any]], k: int) -> list[dict[str, Any]]:
     """Bedrock Rerank (bedrock-agent-runtime): hits in the model's order, with its score."""
+    chars = get_settings().search.rerank_text_chars
     resp = aws.bedrock_agent().rerank(
         queries=[{"type": "TEXT", "textQuery": {"text": query}}],
         sources=[
@@ -83,7 +81,7 @@ def rerank_hits(query: str, hits: list[dict[str, Any]], k: int) -> list[dict[str
                 "type": "INLINE",
                 "inlineDocumentSource": {
                     "type": "TEXT",
-                    "textDocument": {"text": str(h["text"])[:RERANK_TEXT_CHARS]},
+                    "textDocument": {"text": str(h["text"])[:chars]},
                 },
             }
             for h in hits
@@ -92,7 +90,7 @@ def rerank_hits(query: str, hits: list[dict[str, Any]], k: int) -> list[dict[str
             "type": "BEDROCK_RERANKING_MODEL",
             "bedrockRerankingConfiguration": {
                 "numberOfResults": min(k, len(hits)),
-                "modelConfiguration": {"modelArn": get_settings().rerank_model_arn},
+                "modelConfiguration": {"modelArn": get_settings().search.rerank_model_arn},
             },
         },
     )

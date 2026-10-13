@@ -10,6 +10,7 @@ dependencies = [
     "botocore>=1.35",
     "pydantic>=2.9,<3",
     "python-ulid>=3.0,<4",
+    "entingestion-common",  # services/common (path source below)
 ]
 
 [project.optional-dependencies]
@@ -52,6 +53,10 @@ packages = ["src/ingest"]
 [tool.uv]
 # Lambda groups are installed from the lock with their extras; dev installs everything.
 default-groups = ["dev"]
+
+[tool.uv.sources]
+# Shared code (services/common); the Lambda builds install it next to the hash-locked deps.
+entingestion-common = { path = "../common", editable = true }
 
 [tool.ruff]
 line-length = 100

@@ -1,4 +1,5 @@
-"""Error taxonomy and classifier (brief §9).
+"""Error taxonomy and classifier: every failure gets a code and a class (transient, permanent,
+skip, route) that decides whether it is retried.
 
 Step Functions matches Retry/Catch on the Lambda error type, which is the exception class name.
 Every step raises one of the IngestError subclasses below, so the ASL can say, for example:
@@ -47,7 +48,6 @@ class ErrorCode(StrEnum):
     EMPTY_TEXT = "E_EMPTY_TEXT"
     PII_BLOCKED = "E_PII_BLOCKED"  # PII found and the source's policy is block (ingest.pii)
     TOO_LARGE = "E_TOO_LARGE"
-    LEASE_BUSY = "E_LEASE_BUSY"  # another run holds the article; retried
     VALIDATION = "E_VALIDATION"  # always suffixed: E_VALIDATION_<CHECK>
     BUG = "E_BUG"
 
@@ -77,7 +77,6 @@ _CLASS_BY_CODE: dict[str, ErrorClass] = {
     ErrorCode.PII_BLOCKED: ErrorClass.SKIP,
     # Fetch already routes big PDFs to OCR; what's still too large can't be processed.
     ErrorCode.TOO_LARGE: ErrorClass.PERMANENT,
-    ErrorCode.LEASE_BUSY: ErrorClass.TRANSIENT,
     ErrorCode.BUG: ErrorClass.PERMANENT,
 }
 
@@ -126,7 +125,7 @@ class IngestRoute(IngestError):
 
 class IngestStale(Exception):  # the class name is matched by the state machine
     """This run lost its lease (another run owns the article). Not a failure: the state machine
-    catches it and ends quietly (brief §6.3 step 1, test CONC)."""
+    catches it and ends quietly (two runs of one article at once: the loser stops here)."""
 
 
 class DeletePending(IngestStale):

@@ -1,40 +1,20 @@
-import { type DragEvent, type KeyboardEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type DragEvent, type KeyboardEvent, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { api } from "../api";
 import { ErrorBanner, Loading } from "../components/common";
-import { defaultBatchName, formatBytes, percent } from "../format";
-import type { SourceAccess, SourcesResponse } from "../types";
-import {
-  ACCEPT,
-  type BatchResult,
-  contentTypeFor,
-  type FileState,
-  runBatch,
-  validateFile,
-} from "../upload";
-
-interface Entry {
-  id: string;
-  file: File;
-  title: string;
-  externalId: string;
-  error: string | null; // validation: the file is not sent
-  state: FileState | null; // null until the batch starts
-}
-
-let nextId = 0;
-
-function fileKey(f: File): string {
-  return `${f.name}\u0000${f.size}\u0000${f.lastModified}`;
-}
+import { FileRow } from "../components/FileRow";
+import { defaultBatchName, formatBytes } from "../format";
+import { useSources } from "../hooks/useSources";
+import { useUploadQueue } from "../hooks/useUploadQueue";
+import { ACCEPT, type BatchResult, runBatch, UI_MAX_FILE_BYTES } from "../upload";
 
 export function UploadPage() {
   const navigate = useNavigate();
-  const [sources, setSources] = useState<SourceAccess[] | null>(null);
-  const [sourcesError, setSourcesError] = useState<unknown>(null);
+  const { sources: allSources, error: sourcesError } = useSources();
+  const sources = useMemo(() => allSources?.filter((s) => s.access === "write") ?? null, [allSources]);
   const [source, setSource] = useState("");
   const [name, setName] = useState(() => defaultBatchName());
-  const [entries, setEntries] = useState<Entry[]>([]);
+  const { entries, valid, progress, addFiles, update, remove, clear } = useUploadQueue();
   const [dragging, setDragging] = useState(false);
   const [running, setRunning] = useState(false);
   const [processId, setProcessId] = useState<string | null>(null);
@@ -44,19 +24,8 @@ export function UploadPage() {
   const hintId = useId();
 
   useEffect(() => {
-    const ctrl = new AbortController();
-    api
-      .get<SourcesResponse>("/api/sources", ctrl.signal)
-      .then((r) => {
-        const writable = r.items.filter((s) => s.access === "write");
-        setSources(writable);
-        setSource((cur) => cur || writable[0]?.source || "");
-      })
-      .catch((err: unknown) => {
-        if (!ctrl.signal.aborted) setSourcesError(err);
-      });
-    return () => ctrl.abort();
-  }, []);
+    if (sources) setSource((cur) => cur || sources[0]?.source || "");
+  }, [sources]);
 
   // Leaving mid-upload abandons the batch; ask first.
   useEffect(() => {
@@ -69,24 +38,6 @@ export function UploadPage() {
   }, [running]);
 
   const started = running || result !== null || processId !== null;
-  const valid = entries.filter((e) => !e.error);
-
-  const addFiles = useCallback((files: FileList | File[]) => {
-    setEntries((current) => {
-      const seen = new Set(current.map((e) => fileKey(e.file)));
-      const added: Entry[] = [];
-      for (const file of Array.from(files)) {
-        const key = fileKey(file);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        added.push({ id: `f${++nextId}`, file, title: "", externalId: "", error: validateFile(file), state: null });
-      }
-      return [...current, ...added];
-    });
-  }, []);
-
-  const update = (id: string, patch: Partial<Entry>) =>
-    setEntries((current) => current.map((e) => (e.id === id ? { ...e, ...patch } : e)));
 
   const openPicker = () => inputRef.current?.click();
 
@@ -126,21 +77,12 @@ export function UploadPage() {
   };
 
   const reset = () => {
-    setEntries([]);
+    clear();
     setResult(null);
     setProcessId(null);
     setRunError(null);
     setName(defaultBatchName());
   };
-
-  const progress = useMemo(() => {
-    const states = entries.map((e) => e.state).filter((s): s is FileState => s !== null);
-    return {
-      done: states.filter((s) => s.phase === "done").length,
-      failed: states.filter((s) => s.phase === "failed").length,
-      total: states.length,
-    };
-  }, [entries]);
 
   const selected = sources?.find((s) => s.source === source);
 
@@ -149,7 +91,7 @@ export function UploadPage() {
       <h1>Upload documents</h1>
       <p className="muted">
         Files are sent straight to storage as one batch (a process), then ingested. Allowed: HTML, text, Markdown,
-        PDF and Word (.docx), up to 5 GiB each.
+        PDF and Word (.docx), up to {formatBytes(UI_MAX_FILE_BYTES)} each.
       </p>
 
       <ErrorBanner error={sourcesError} />
@@ -226,7 +168,7 @@ export function UploadPage() {
       {entries.length > 0 && (
         <ul className="file-list" aria-label="Files">
           {entries.map((e) => (
-            <FileRow key={e.id} entry={e} locked={started} onChange={update} onRemove={(id) => setEntries((c) => c.filter((x) => x.id !== id))} />
+            <FileRow key={e.id} entry={e} locked={started} onChange={update} onRemove={remove} />
           ))}
         </ul>
       )}
@@ -266,105 +208,11 @@ export function UploadPage() {
           </button>
         )}
         {!started && entries.length > 0 && (
-          <button type="button" onClick={() => setEntries([])}>
+          <button type="button" onClick={clear}>
             Clear files
           </button>
         )}
       </div>
     </section>
   );
-}
-
-interface FileRowProps {
-  entry: Entry;
-  locked: boolean;
-  onChange: (id: string, patch: Partial<Entry>) => void;
-  onRemove: (id: string) => void;
-}
-
-function FileRow({ entry, locked, onChange, onRemove }: FileRowProps) {
-  const { id, file } = entry;
-  return (
-    <li className={`file-row${entry.error ? " invalid" : ""}`}>
-      <div className="file-main">
-        <span className="file-name" title={file.name}>
-          {file.name}
-        </span>
-        <span className="muted small">
-          {formatBytes(file.size)} · {contentTypeFor(file.name) ?? "unsupported"}
-        </span>
-      </div>
-      {!entry.error && (
-        <div className="file-meta">
-          <label className="sr-only" htmlFor={`${id}-title`}>
-            Title for {file.name}
-          </label>
-          <input
-            id={`${id}-title`}
-            type="text"
-            placeholder="Title (optional)"
-            maxLength={1000}
-            value={entry.title}
-            disabled={locked}
-            onChange={(e) => onChange(id, { title: e.target.value })}
-          />
-          <label className="sr-only" htmlFor={`${id}-ext`}>
-            External id for {file.name}
-          </label>
-          <input
-            id={`${id}-ext`}
-            type="text"
-            placeholder="External id (optional)"
-            maxLength={256}
-            value={entry.externalId}
-            disabled={locked}
-            onChange={(e) => onChange(id, { externalId: e.target.value })}
-          />
-        </div>
-      )}
-      <div className="file-status">
-        {entry.error ? <span className="field-error">{entry.error}</span> : <FileProgress state={entry.state} name={file.name} />}
-      </div>
-      {!locked && (
-        <button type="button" className="link-button" onClick={() => onRemove(id)} aria-label={`Remove ${file.name}`}>
-          Remove
-        </button>
-      )}
-    </li>
-  );
-}
-
-function FileProgress({ state, name }: { state: FileState | null; name: string }) {
-  if (!state) return <span className="muted small">Ready</span>;
-  switch (state.phase) {
-    case "queued":
-      return <span className="muted small">Queued</span>;
-    case "hashing":
-      return (
-        <span className="progress-cell">
-          <progress max={1} value={state.progress} aria-label={`Checksum of ${name}`} />
-          <span className="small">Checksum {percent(state.progress)}</span>
-        </span>
-      );
-    case "requesting":
-      return <span className="muted small">Requesting upload URL...</span>;
-    case "uploading":
-      return (
-        <span className="progress-cell">
-          <progress max={1} value={state.progress} aria-label={`Upload of ${name}`} />
-          <span className="small">
-            Uploading {percent(state.progress)}
-            {state.attempt > 1 ? ` (attempt ${state.attempt})` : ""}
-          </span>
-        </span>
-      );
-    case "done":
-      return (
-        <span className="small ok-text">
-          Uploaded · <Link to={`/articles/${encodeURIComponent(state.articleId)}`}>{state.articleId}</Link>
-        </span>
-      );
-    case "failed":
-      return <span className="field-error">{state.message}</span>;
-  }
 }

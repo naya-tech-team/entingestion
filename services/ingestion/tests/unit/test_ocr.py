@@ -1,4 +1,4 @@
-"""OCR path for scanned and very large PDFs (brief §4.4, UC12), with Textract faked."""
+"""OCR path for scanned and very large PDFs (docs/USE_CASES.md UC12), with Textract faked."""
 
 from __future__ import annotations
 
@@ -84,6 +84,8 @@ class FakeTextract:
 
 @pytest.fixture
 def textract(env: Env, monkeypatch: pytest.MonkeyPatch) -> FakeTextract:
+    monkeypatch.setenv("OCR_ENABLED", "true")  # off by default
+    aws.reset()
     fake = FakeTextract()
     monkeypatch.setattr(aws, "textract", lambda: fake)
     return fake

@@ -1,1 +1,1 @@
-"""Structure-aware chunking (brief §4.4 step 5)."""
+"""Structure-aware chunking (the Chunk step)."""

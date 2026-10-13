@@ -18,7 +18,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from producer_client.sigv4 import Signer, region_from_url
+from producer_client.sigv4 import Signer, region_in_url
 
 CHUNK = 8 * 1024 * 1024
 PUT_ATTEMPTS = 3
@@ -81,7 +81,7 @@ class ProducerClient:
     ) -> None:
         self.api_url = api_url.rstrip("/")
         self.session = session or boto3.Session()
-        resolved = region or region_from_url(self.api_url) or self.session.region_name
+        resolved = region or region_in_url(self.api_url) or self.session.region_name
         if not resolved:
             raise ValueError("cannot determine the AWS region; pass --region")
         self.signer = Signer(self.session, resolved)

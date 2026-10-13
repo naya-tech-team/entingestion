@@ -43,7 +43,7 @@ The **state bucket** policy admits only the deploy roles, the people in `deploy_
 
 **Audit trail.** `entingestion-account-trail` records management events (read and write) in every region, and object-level reads and writes of the state bucket (plus `trail_data_event_bucket_arns`). Log files go to `entingestion-trail-<account>-<region>`, encrypted with their own key, with log file validation, kept `trail_retention_days` (365). No CloudWatch Logs delivery, so it costs next to nothing. Look up events in the console (CloudTrail → Event history, 90 days) or query the bucket with Athena; `aws cloudtrail validate-logs` proves no log file was changed.
 
-> dev and prod share one account today. The boundaries stop accidents and the obvious escalation paths, but not everything: not every action supports the `env` tag keys, and name patterns only cover the stacks' naming. The hard boundary comes with separate accounts (phase 2, below).
+> dev and prod share one account today. The boundaries stop accidents and the obvious escalation paths, but not everything: not every action supports the `env` tag keys, and name patterns only cover the stacks' naming. The hard boundary comes with separate accounts ([Next steps](#next-steps)).
 
 ## One-time setup
 
@@ -52,30 +52,33 @@ The **state bucket** policy admits only the deploy roles, the people in `deploy_
    ```bash
    aws login --profile entingestion          # opens the browser; sign in with MFA
    export AWS_ACCOUNT_ID=<12-digit account> TF_VAR_aws_account_id=<same>
+   export AWS_REGION=<state region> TF_VAR_region=<same>  # the state bucket's region
    export TF_VAR_deploy_principal_arns='["user/<you>"]'   # you must be on it (see below)
    cd terraform/bootstrap
    AWS_PROFILE=entingestion terraform init && AWS_PROFILE=entingestion terraform apply
    terraform output deploy_role_arns
    ```
-   The people come from the environment, never a tracked file. To add someone, apply again with them in the list: `TF_VAR_deploy_principal_arns='["user/<you>","user/<them>"]'`. The ARN is derived from the account; a full ARN also works, for someone in another account. The plan refuses to run if you, the admin applying, aren't in the list: the state bucket policy would lock you out.
+   The account, the region and the people come from the environment, never a tracked file. The stacks' Makefile later finds the state bucket in `STATE_REGION` (default `AWS_REGION`), which must be this region even when the stacks run elsewhere. To add someone, apply again with them in the list: `TF_VAR_deploy_principal_arns='["user/<you>","user/<them>"]'`. The ARN is derived from the account; a full ARN also works, for someone in another account. The plan refuses to run if you, the admin applying, aren't in the list: the state bucket policy would lock you out.
 3. **Add the profiles** to `~/.aws/config`. `aws login` writes the first one; you add the role profiles yourself:
    ```ini
    [profile entingestion]
-   region = us-west-2
+   region = <region>
    # login_session = …   (added by aws login)
 
    [profile entingestion-dev]
    role_arn          = arn:aws:iam::<account>:role/entingestion-dev-deploy
    source_profile    = entingestion
    role_session_name = <your-name>
-   region            = us-west-2
+   region            = <region>
 
    [profile entingestion-prod]
    role_arn          = arn:aws:iam::<account>:role/entingestion-prod-deploy
    source_profile    = entingestion
    role_session_name = <your-name>
-   region            = us-west-2
+   region            = <region>
    ```
+
+   `<region>` is the stacks' region (`region` in `terraform/envs/<env>/common.tfvars`).
 4. **Check:**
    ```bash
    aws sts get-caller-identity --profile entingestion-dev   # …:assumed-role/entingestion-dev-deploy/<your-name>
@@ -109,8 +112,8 @@ make -C terraform apply ENV=dev STACK=ingestion
 | `uvx awscurl` | `AWS_PROFILE=entingestion-dev` (or `--profile`) |
 | `producer-cli` | `--profile entingestion-dev` |
 | Python scripts (`scripts/*.py`, boto3) | `AWS_PROFILE=entingestion-dev` |
-| Bruno | `awsProfile: entingestion-dev` in `bruno/environments/dev.bru`, or environment credentials |
-| `make destroy` / `teardown.py` | Inherit the Makefile's profile |
+| Bruno | `AWS_PROFILE=entingestion-dev` (the environments read it from the shell), or environment credentials |
+| `make destroy` / `teardown.py` | Inherit the Makefile's profile (and the stacks' region from `common.tfvars`) |
 
 If a tool's AWS SDK can't read an `aws login` session or follow the role chain, export short-lived credentials into the shell instead. They last up to 1 hour:
 
@@ -128,12 +131,13 @@ eval "$(tools/aws-env.sh entingestion-dev)"
 | `AccessDenied` on `…/prod/…` state as the dev role | Working as intended: use `ENV=prod` with the prod profile |
 | Terraform: `no valid credential sources` while the CLI works | `AWS_EXPORT_CREDS=1 make …` |
 | `AccessDenied … iam:CreateRole` or `iam:PutRolePermissionsBoundary` | The workload boundary doesn't exist yet (apply bootstrap first), or the role isn't named `<stack>-<env>-*`, or `workload_boundary_enabled` is off |
-| `AccessDenied … s3:PutObject` on state | The backend has no `kms_key_id`: re-run `make init`, which passes it from `AWS_ACCOUNT_ID` |
+| `AccessDenied … s3:PutObject` on state | The backend has no `kms_key_id`: re-run `make init`, which passes it from `AWS_ACCOUNT_ID` and `STATE_REGION` |
+| `make init`: the state bucket doesn't exist, or `AuthorizationHeaderMalformed` / a 301 | `STATE_REGION` (default `AWS_REGION`) isn't the region the bootstrap was applied in. Set `STATE_REGION=<bootstrap region>` |
 | `AWS_ACCOUNT_ID must be the 12-digit account …` / `AWS_ACCOUNT_ID is … but the credentials are …` | Set `export AWS_ACCOUNT_ID=<account>` to the account you mean to deploy to, and use credentials for that account |
 | `SSL validation failed … CERTIFICATE_VERIFY_FAILED` | A TLS-inspecting proxy (Zscaler): set `AWS_CA_BUNDLE`; see [RUNBOOK](RUNBOOK.md#behind-a-tls-inspecting-proxy-zscaler) |
-| A script works on the wrong region (`us-east-1`) | boto3 ignores `AWS_REGION`: set `AWS_DEFAULT_REGION=us-west-2` too, or use `tools/aws-env.sh`, which sets both |
+| A script works on the wrong region | boto3 ignores `AWS_REGION`: set `AWS_DEFAULT_REGION=<region>` too, or use `tools/aws-env.sh`, which sets both |
 
-## Phase 2
+## Next steps
 
 - **Separate accounts:** an AWS Organization with separate dev and prod accounts (the management account stays empty). Identity Center with permission sets replaces `aws login`. Each account gets the same deploy-role design, so only role ARNs and profile names change.
 - **Separate log-group keys:** the log groups share each stack's data key today. A dedicated logs key per stack keeps log readers away from the data; it means new log groups (replacement), so it waits for a quiet window.

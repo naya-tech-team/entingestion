@@ -1,4 +1,4 @@
-"""Pipeline steps and status values stored in ingestion_status (brief §4.4, §6)."""
+"""Pipeline steps and status values stored in ingestion_status."""
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class ArticleStatus(StrEnum):
 
 
 # Status LATEST shows while each step runs. Validate moves to STAGED when the manifest passes,
-# and Finalize to INDEXED (brief §4.4 "after" column).
+# and Finalize to INDEXED.
 STEP_STATUS: dict[StepName, ArticleStatus] = {
     StepName.CLAIM: ArticleStatus.CLAIMED,
     StepName.FETCH: ArticleStatus.FETCHING,
@@ -73,7 +73,7 @@ STEP_SUCCESS_STATUS: dict[StepName, ArticleStatus] = {
     StepName.VALIDATE: ArticleStatus.STAGED,
 }
 
-# Process roll-up counter for each terminal status (brief §6.4).
+# Process roll-up counter for each terminal status (ingest.status.rollup).
 ROLLUP_COUNTER: dict[ArticleStatus, str] = {
     ArticleStatus.INDEXED: "indexed",
     ArticleStatus.SKIPPED: "skipped",
@@ -81,7 +81,7 @@ ROLLUP_COUNTER: dict[ArticleStatus, str] = {
     ArticleStatus.FAILED_PERMANENT: "failed",
 }
 
-# Moving into one of these updates the process roll-up (brief §6.4).
+# Moving into one of these updates the process roll-up.
 TERMINAL_STATUSES: frozenset[ArticleStatus] = frozenset(
     {
         ArticleStatus.INDEXED,

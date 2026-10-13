@@ -1,5 +1,5 @@
-"""OCR for scanned or very large PDFs (brief §4.4, UC12): Amazon Textract async, orchestrated by
-the state machine instead of a long-running worker.
+"""OCR for scanned or very large PDFs (docs/USE_CASES.md UC12): Amazon Textract async,
+orchestrated by the state machine instead of a long-running worker.
 
     OcrStart   -> StartDocumentAnalysis (LAYOUT + TABLES) on the producer's object version;
                   Textract writes its result to staging (<prefix>ocr/<JobId>/1..n), which is the
@@ -24,14 +24,14 @@ from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from ingest import aws
-from ingest.config import get_settings
+from ingest.config import get_settings, require
 from ingest.errors import ErrorCode, IngestStale, classify, make_error
 from ingest.extract.ocr import blocks_from_textract, title_of
 from ingest.ids import STAGING_FILES
 from ingest.models.staging import ExtractedContent
 from ingest.models.status import StepName
 from ingest.staging.io import parse_s3_uri
-from ingest.steps.protocol import StepContext, StepOutput, step
+from ingest.steps.protocol import STEP_REQUIRED, StepContext, StepOutput, step
 
 logger = Logger()
 tracer = Tracer()
@@ -43,6 +43,7 @@ FEATURES: list[Literal["LAYOUT", "TABLES"]] = ["LAYOUT", "TABLES"]
 
 
 def _context(event: dict[str, Any]) -> StepContext:
+    require(*STEP_REQUIRED)
     ctx = StepContext.from_event(event)
     logger.append_keys(
         article_id=ctx.article_id, run_id=ctx.run_id, step="EXTRACT", doc_version=ctx.doc_version
@@ -112,7 +113,7 @@ def poll(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
         raise make_error(
             ErrorCode.UNREADABLE, f"Textract job {job_id} failed: {resp.get('StatusMessage', '')}"
         )
-    limit = ctx.settings.ocr_max_polls
+    limit = ctx.settings.ocr.max_polls
     if status == "IN_PROGRESS" and polls >= limit:
         raise make_error(
             ErrorCode.TIMEOUT,

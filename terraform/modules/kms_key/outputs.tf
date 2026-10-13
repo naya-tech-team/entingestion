@@ -17,3 +17,8 @@ output "alias_name" {
   description = "Full alias name, including the alias/ prefix."
   value       = aws_kms_alias.this.name
 }
+
+output "statement_sids" {
+  description = "The key policy's statement ids, in order (for plan-time tests)."
+  value       = [for s in data.aws_iam_policy_document.key.statement : s.sid]
+}

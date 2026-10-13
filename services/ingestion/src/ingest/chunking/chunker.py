@@ -9,7 +9,7 @@
 - Chunks smaller than `min_tokens` are merged into the previous chunk of the same section.
 - A heading with nothing under it (no text, no subsections) is a chunk of its own.
 - embed_text = f"{title} \u203a {' > '.join(heading_path)}\\n\\n{text}"
-  (U+203A is a single right-pointing angle quote, as in the brief).
+  (U+203A is a single right-pointing angle quote).
 - char_start/char_end: the chunk's span in the normalized text (NormalizedDocument.text()),
   for citations; with page_start/page_end for paged documents.
 
@@ -348,7 +348,7 @@ class Chunker:
 
 def embed_text(title: str | None, heading_path: list[str], text: str) -> str:
     prefix_parts = [p for p in (title, " > ".join(heading_path)) if p]
-    prefix = " \u203a ".join(prefix_parts)  # U+203A, as in brief §4.4
+    prefix = " \u203a ".join(prefix_parts)  # U+203A: the title separator of embed_text
     return f"{prefix}\n\n{text}" if prefix else text
 
 

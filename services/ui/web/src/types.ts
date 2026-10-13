@@ -20,8 +20,8 @@ export interface Process {
   rejected_count: number;
   superseded_count?: number;
   expired_count?: number;
-  tickets_issued: number | null;
-  pending_uploads?: number | null;
+  tickets_issued: number;
+  pending_uploads: number;
   metadata?: Record<string, unknown> | null;
   created_by: string;
   created_at: string;
@@ -272,7 +272,7 @@ export interface DlqMove {
 /**
  * POST /api/ops/ingest, /api/ops/processes/{id}/ingest and /api/ops/dlq/redrive.
  * A dry run lists `messages`; a real call reports `queued`. Ids with no ingestion record are in
- * `not_found` (older docs call it `missing`).
+ * `not_found`.
  */
 export interface ActionResponse {
   dry_run: boolean;
@@ -280,7 +280,6 @@ export interface ActionResponse {
   messages?: IngestMessagePreview[];
   queued?: number;
   not_found?: string[];
-  missing?: string[];
   process_id?: string;
   error_code?: string | null;
   dlq?: DlqMove | null;

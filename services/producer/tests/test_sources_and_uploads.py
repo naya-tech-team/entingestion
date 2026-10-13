@@ -136,7 +136,26 @@ def test_a_next_token_only_pages_its_own_process(api: ApiCall) -> None:
     resp = api("GET", f"/v1/processes/{pid}/uploads", query={"next_token": token})
 
     assert resp.status == 422
-    assert resp.body["errors"][0]["loc"] == ["query", "next_token"]
+    assert resp.body["errors"] == [
+        {"loc": ["query", "next_token"], "msg": "next_token belongs to another process"}
+    ]
+
+
+def test_a_next_token_must_have_its_listings_key_shape(api: ApiCall) -> None:
+    """A token that decodes but isn't a key of this listing is a 422, not a DynamoDB error."""
+    from entcommon.paging import encode_token
+
+    pid = new_process(api)
+    good = {"upload_id": "upl_1", "process_id": pid, "created_at": "2026-10-11T00:00:00.000Z"}
+    for key in ({"process_id": pid}, good | {"extra": "x"}):
+        resp = api("GET", f"/v1/processes/{pid}/uploads", query={"next_token": encode_token(key)})
+
+        assert resp.status == 422
+        assert resp.body["errors"] == [
+            {"loc": ["query", "next_token"], "msg": "next_token is not valid"}
+        ]
+    ok = api("GET", f"/v1/processes/{pid}/uploads", query={"next_token": encode_token(good)})
+    assert ok.status == 200
 
 
 @pytest.mark.parametrize(

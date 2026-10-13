@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -11,7 +12,30 @@ import pytest
 from botocore.client import BaseClient
 from moto import mock_aws
 
-REGION = "us-west-2"
+
+def _test_region() -> str:
+    """The region the tests run in, from the environment: AWS_REGION, else AWS_DEFAULT_REGION,
+    else the AWS config's region. moto works in any region; nothing here names one."""
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    region = region or boto3.session.Session().region_name
+    if not region:
+        raise RuntimeError("set AWS_REGION (or AWS_DEFAULT_REGION) to run the tests")
+    return region
+
+
+REGION = _test_region()
+
+
+def bucket_location() -> dict[str, Any]:
+    """create_bucket's location argument: S3 refuses a LocationConstraint of us-east-1
+    (its default region)."""
+    return (
+        {}
+        if REGION == "us-east-1"
+        else {"CreateBucketConfiguration": {"LocationConstraint": REGION}}
+    )
+
+
 BUCKET = "producer-test-raw"
 CALLER_ARN = "arn:aws:iam::123456789012:user/tester"  # writes "news"
 OTHER_ARN = "arn:aws:sts::123456789012:assumed-role/sports-writer/s1"  # writes "sports"
@@ -62,7 +86,7 @@ PROCESS_UPLOADS_ATTRIBUTES = [
 
 
 def _create_tables() -> None:
-    """Mirror terraform/services/producer/main.tf."""
+    """Mirror the tables in terraform/stacks/producer."""
     ddb = boto3.client("dynamodb", region_name=REGION)
     ddb.create_table(
         TableName="process",
@@ -94,29 +118,10 @@ def _create_tables() -> None:
         BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[
             {"AttributeName": name, "AttributeType": "S"}
-            for name in ("article_id", "process_id", "updated_at", "updated_date", "updated_shard")
+            for name in ("article_id", "updated_at", "updated_shard")
         ],
         KeySchema=[{"AttributeName": "article_id", "KeyType": "HASH"}],
         GlobalSecondaryIndexes=[
-            {
-                "IndexName": "gsi_process",
-                "KeySchema": [
-                    {"AttributeName": "process_id", "KeyType": "HASH"},
-                    {"AttributeName": "updated_at", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "ALL"},
-            },
-            {
-                "IndexName": "gsi_updated",
-                "KeySchema": [
-                    {"AttributeName": "updated_date", "KeyType": "HASH"},
-                    {"AttributeName": "updated_at", "KeyType": "RANGE"},
-                ],
-                "Projection": {
-                    "ProjectionType": "INCLUDE",
-                    "NonKeyAttributes": ["content_sha256", "process_id", "upload_id"],
-                },
-            },
             {
                 "IndexName": "gsi_updated_shard",
                 "KeySchema": [
@@ -159,7 +164,11 @@ def _create_tables() -> None:
                     {"AttributeName": "pending", "KeyType": "HASH"},
                     {"AttributeName": "ticket_expires_epoch", "KeyType": "RANGE"},
                 ],
-                "Projection": {"ProjectionType": "ALL"},
+                # What the janitor reads of an expired ticket.
+                "Projection": {
+                    "ProjectionType": "INCLUDE",
+                    "NonKeyAttributes": ["status", "s3_key", "process_id"],
+                },
             },
             {
                 "IndexName": "gsi_process_uploads",
@@ -218,7 +227,7 @@ def aws(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     with mock_aws():
         _create_tables()
         s3 = boto3.client("s3", region_name=REGION)
-        s3.create_bucket(Bucket=BUCKET, CreateBucketConfiguration={"LocationConstraint": REGION})
+        s3.create_bucket(Bucket=BUCKET, **bucket_location())
         # Mirrors the Terraform bucket (versioned), so articles get s3_version_id.
         s3.put_bucket_versioning(Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"})
         from producer import api, config, registrar
@@ -240,7 +249,7 @@ def aws(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 class FakeContext:
     function_name: str = "producer-api"
     memory_limit_in_mb: int = 512
-    invoked_function_arn: str = "arn:aws:lambda:us-west-2:123456789012:function:producer-api"
+    invoked_function_arn: str = f"arn:aws:lambda:{REGION}:123456789012:function:producer-api"
     aws_request_id: str = "00000000-0000-0000-0000-000000000000"
 
     def get_remaining_time_in_millis(self) -> int:

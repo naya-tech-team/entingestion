@@ -1,19 +1,9 @@
 # producer stack, prod. Code: terraform/stacks/producer. Usage: make plan ENV=prod STACK=producer
+# Region and mandatory tags: envs/prod/common.tfvars.
 
-env    = "prod"
-region = "us-west-2"
+env = "prod"
 
-mandatory_tags = {
-  created_by           = "naveen"
-  created_date         = "" # required: the date of the first prod apply
-  owner                = "naveen"
-  internal_client_code = "" # required: fill in
-  client               = "" # required: fill in
-  project_name         = "entingestion"
-  division             = "" # required: fill in
-}
-
-# Brief §7.3: prod table names are unprefixed (process, articles, producer_uploads).
+# prod table names are unprefixed (process, articles, producer_uploads).
 table_prefix = ""
 
 # Browser uploads: the upload UI's origin comes from SSM (ui stack); add any other web app here.
@@ -34,7 +24,7 @@ waf_rate_limit = 2000
 # (alarm_emails validation) until an address is set. See docs/RUNBOOK.md "Alarms".
 alarm_emails = []
 
-# Disaster recovery: AWS Backup of the process, articles and uploads tables, copied to us-east-2.
+# Disaster recovery: AWS Backup of the process, articles and uploads tables, copied to another region.
 backup_enabled     = true
 backup_copy_region = "us-east-2"
 
@@ -42,7 +32,7 @@ backup_copy_region = "us-east-2"
 registrar_reserved_concurrency = 10
 api_reserved_concurrency       = 10
 
-# Who may use which source (review C3); required before the first prod apply, e.g.
+# Who may use which source; required before the first prod apply, e.g.
 #   source_access = { news = { tenant_id = "news", writers = ["role/news-feed"],
 #                              readers = ["role/search-*"] } }
 admin_principals = ["role/entingestion-prod-deploy"]

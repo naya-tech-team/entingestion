@@ -26,8 +26,10 @@ docs {
   Which sources (and so which tenants) a caller may use is set by the producer's
   `source_access`: writers create processes and upload, readers read and search.
 
-  Credentials come from the AWS profile in the environment (`awsProfile`), or from
-  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` in the shell.
+  The environments read every deploy-specific value from the shell (or `bruno/.env`):
+  `PRODUCER_URL`, `INGESTION_URL`, `AWS_REGION`, `AWS_PROFILE`, `BRUNO_SOURCE`, `BRUNO_TENANT`,
+  `LIVE_TABLE` and `NEW_TABLE` (see bruno/README.md). Credentials come from that AWS profile, or
+  from `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` in the shell.
 
   The **Use cases** folders run end to end with the collection runner or `bru run`; they poll
   until the pipeline reaches the expected state. See bruno/README.md and docs/USE_CASES.md.

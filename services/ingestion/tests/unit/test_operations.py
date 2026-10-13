@@ -1,5 +1,5 @@
 """Phase 2 operations in process: resume, re-queue, the control API and the reconciler
-(brief §10-11), on top of the pipeline harness in test_pipeline."""
+on top of the pipeline harness in test_pipeline."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ USER = "arn:aws:iam::123456789012:user/operator"
 
 def queued() -> list[dict[str, Any]]:
     sqs = boto3.client("sqs", region_name=REGION)
-    url = aws.get_settings().ingest_queue_url
+    url = aws.get_settings().queues.ingest_url
     out: list[dict[str, Any]] = []
     while True:
         resp = sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10)
@@ -66,6 +66,8 @@ def settle(process_id: str, registered: int) -> None:
             "expected_count": registered,
             "registered_count": registered,
             "rejected_count": 0,
+            "tickets_issued": registered,
+            "pending_uploads": 0,
         }
     )
 
@@ -338,9 +340,9 @@ def test_ops_overview(env: Env) -> None:
     put_latest("art_c", "EMBEDDING", "2026-10-11T03:00:00.000Z")
     put_latest("art_d", "INDEXED", "2026-10-11T00:00:00.000Z")
     sqs = boto3.client("sqs", region_name=REGION)
-    sqs.send_message(QueueUrl=aws.get_settings().ingest_dlq_url, MessageBody="{}")
-    sqs.send_message(QueueUrl=aws.get_settings().ingest_queue_url, MessageBody="{}")
-    sqs.receive_message(QueueUrl=aws.get_settings().ingest_queue_url, VisibilityTimeout=60)
+    sqs.send_message(QueueUrl=aws.get_settings().queues.ingest_dlq_url, MessageBody="{}")
+    sqs.send_message(QueueUrl=aws.get_settings().queues.ingest_url, MessageBody="{}")
+    sqs.receive_message(QueueUrl=aws.get_settings().queues.ingest_url, VisibilityTimeout=60)
 
     status, out = api("GET", "/v1/ops/overview")
 
@@ -577,7 +579,7 @@ def test_weekly_sweep_deletes_articles_whose_producer_row_is_gone(
     assert {m["article_id"]: m["event"] for m in queued()}["art_lost"] == "REMOVE"
 
 
-def test_producer_updates_are_found_on_every_shard_and_the_old_index(env: Any) -> None:
+def test_producer_updates_are_found_on_every_shard(env: Any) -> None:
     from ingest import producer
 
     articles = boto3.resource("dynamodb", region_name=REGION).Table("articles")
@@ -588,12 +590,10 @@ def test_producer_updates_are_found_on_every_shard_and_the_old_index(env: Any) -
         articles.put_item(
             Item={"article_id": f"art_s{i}", "updated_at": at, "updated_shard": shard}
         )
-    articles.put_item(Item={"article_id": "art_old", "updated_at": f"{day}T01:00:00.000Z",
-                            "updated_date": day})  # fmt: skip
 
     found = {a["article_id"] for a in producer.updated_on(day)}
 
-    assert found == {f"art_s{i}" for i in range(20)} | {"art_old"}
+    assert found == {f"art_s{i}" for i in range(20)}
 
 
 @pytest.mark.parametrize(
@@ -602,7 +602,7 @@ def test_producer_updates_are_found_on_every_shard_and_the_old_index(env: Any) -
         ({"tickets_issued": 3, "pending_uploads": 0}, True),
         ({"tickets_issued": 3, "pending_uploads": 1}, False),  # an upload has no outcome yet
         ({"tickets_issued": 2, "pending_uploads": 0}, False),  # fewer uploads than expected
-        ({"registered_count": 2, "rejected_count": 1}, True),  # before uploads were counted
+        ({"tickets_issued": 0, "pending_uploads": 0}, False),  # nothing issued yet
     ],
 )
 def test_settled_follows_the_producer(process: dict[str, Any], settled: bool) -> None:

@@ -6,6 +6,7 @@
 
 import { createSHA256 } from "hash-wasm";
 import { errorMessage, seg } from "./api";
+import { formatBytes } from "./format";
 import { Sha256 } from "./sha256";
 import type { Process, UploadTicket } from "./types";
 
@@ -23,7 +24,12 @@ export const CONTENT_TYPES: Readonly<Record<string, string>> = {
 
 /** For <input accept>: the allowed extensions. */
 export const ACCEPT = Object.keys(CONTENT_TYPES).join(",");
-export const MAX_FILE_BYTES = 5 * 1024 ** 3; // a single S3 PUT
+/**
+ * UI default: an early check so a file that can't go up is flagged before the batch starts.
+ * The producer enforces the real limit (its MAX_FILE_BYTES setting) when it issues the ticket;
+ * this matches its default, S3's single-PUT limit.
+ */
+export const UI_MAX_FILE_BYTES = 5 * 1024 ** 3;
 export const HASH_SLICE_BYTES = 8 * 1024 * 1024;
 export const CONCURRENCY = 3;
 export const PUT_ATTEMPTS = 3;
@@ -44,10 +50,55 @@ export function validateFile(file: { name: string; size: number }): string | nul
     return "Unsupported type: use .html, .htm, .txt, .md, .markdown, .pdf or .docx";
   }
   if (file.size <= 0) return "The file is empty";
-  if (file.size > MAX_FILE_BYTES) return "The file is larger than 5 GiB";
+  if (file.size > UI_MAX_FILE_BYTES) return `The file is larger than ${formatBytes(UI_MAX_FILE_BYTES)}`;
   if (file.name.length > MAX_FILENAME) return "The file name is longer than 255 characters";
   if (/[/\\\u0000-\u001f\u007f]/.test(file.name)) return "The file name has a path separator or control character";
   return null;
+}
+
+// --- the file queue (the upload page's list) ----------------------------------------------------
+
+/** What the queue needs of a file (a File in the browser; a plain object in tests). */
+export type FileLike = Pick<File, "name" | "size" | "lastModified">;
+
+export interface UploadEntry<F extends FileLike = File> {
+  id: string;
+  file: F;
+  title: string;
+  externalId: string;
+  error: string | null; // validation: the file is not sent
+  state: FileState | null; // null until the batch starts
+}
+
+function fileKey(f: FileLike): string {
+  return `${f.name}\u0000${f.size}\u0000${f.lastModified}`;
+}
+
+/** Appends the files not already queued (same name, size and modification time), validated. */
+export function addEntries<F extends FileLike>(
+  current: readonly UploadEntry<F>[],
+  files: Iterable<F>,
+  newId: () => string,
+): UploadEntry<F>[] {
+  const seen = new Set(current.map((e) => fileKey(e.file)));
+  const added: UploadEntry<F>[] = [];
+  for (const file of files) {
+    const key = fileKey(file);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    added.push({ id: newId(), file, title: "", externalId: "", error: validateFile(file), state: null });
+  }
+  return [...current, ...added];
+}
+
+/** Files done and failed, out of those the batch started. */
+export function queueProgress(entries: readonly { state: FileState | null }[]): { done: number; failed: number; total: number } {
+  const states = entries.map((e) => e.state).filter((s): s is FileState => s !== null);
+  return {
+    done: states.filter((s) => s.phase === "done").length,
+    failed: states.filter((s) => s.phase === "failed").length,
+    total: states.length,
+  };
 }
 
 // --- hashing ----------------------------------------------------------------------------------

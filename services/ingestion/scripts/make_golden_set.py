@@ -1,10 +1,12 @@
-"""Write a new synthetic golden set for retrieval evaluation (review M3.4) to staging.
+"""Write a new synthetic golden set for retrieval evaluation to staging.
 
-    uv run python scripts/make_golden_set.py [--env dev] [--per-article 3] [--max-articles 50]
-                                             [--no-answer 10] [--seed 7]
+    uv run python scripts/make_golden_set.py --model <bedrock-model-id> [--env dev]
+        [--per-article 3] [--max-articles 50] [--no-answer 10] [--seed 7]
 
-For each sampled indexed article, chunks are picked across the whole document (evenly spaced,
-skipping tiny ones), and Amazon Nova Lite (Bedrock) writes one question that each chunk answers.
+--model (or GOLDEN_MODEL_ID) is required: any Bedrock text model the Converse API serves and the
+account has access to. For each sampled indexed article, chunks are picked across the whole
+document (evenly spaced, skipping tiny ones), and the model writes one question that each chunk
+answers.
 The question is labelled with that chunk_id (and the article's version, since chunk ids change
 with it). A few questions the corpus can't answer are added as no_answer.
 
@@ -18,16 +20,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 from datetime import UTC, datetime
 from typing import Any
 
 import boto3
+from _tf import default_env, tf_output
 from botocore.exceptions import ClientError
-from gate_phase1 import tf_output
 
-MODEL = "amazon.nova-lite-v1:0"
 GOLDEN_DIR = "_eval/golden/"
 POINTER = f"{GOLDEN_DIR}LATEST"
 MIN_CHUNK_TOKENS = 40  # too little text for a specific question
@@ -84,9 +86,9 @@ def spread(chunks: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
     return [usable[round(i * step)] for i in range(n)]
 
 
-def question(bedrock: Any, title: str, text: str) -> str | None:
+def question(bedrock: Any, model: str, title: str, text: str) -> str | None:
     resp = bedrock.converse(
-        modelId=MODEL,
+        modelId=model,
         messages=[
             {"role": "user", "content": [{"text": PROMPT.format(title=title, text=text[:4000])}]}
         ],
@@ -108,12 +110,19 @@ def exists(s3: Any, bucket: str, key: str) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", default="dev")
+    parser.add_argument("--env", default=default_env())
     parser.add_argument("--per-article", type=int, default=3)
     parser.add_argument("--max-articles", type=int, default=50)
     parser.add_argument("--no-answer", type=int, default=10)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--model",
+        default=os.environ.get("GOLDEN_MODEL_ID"),
+        help="Bedrock model (Converse API) that writes the questions; or $GOLDEN_MODEL_ID",
+    )
     args = parser.parse_args()
+    if not args.model:
+        parser.error("name the question-writing model: --model or GOLDEN_MODEL_ID")
 
     status_table = tf_output("ingestion", args.env, "status_table_name")
     bucket = tf_output("ingestion", args.env, "staging_bucket")
@@ -137,7 +146,7 @@ def main() -> int:
             continue
         for chunk in spread(chunks, args.per_article):
             title = str((chunk.get("metadata") or {}).get("title") or "")
-            q = question(bedrock, title, chunk["text"])
+            q = question(bedrock, args.model, title, chunk["text"])
             if q is None:
                 continue
             lines.append(

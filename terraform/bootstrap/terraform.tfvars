@@ -1,4 +1,5 @@
-region = "us-east-1"
+# The region comes from the environment, not this file: export TF_VAR_region=$AWS_REGION
+# (the stacks' Makefile finds the state bucket in STATE_REGION, which defaults to AWS_REGION).
 
 mandatory_tags = {
   created_by           = "naveen"

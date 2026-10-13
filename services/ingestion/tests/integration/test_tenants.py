@@ -1,13 +1,11 @@
-"""Migration 005 against a real pgvector database, as the roles the functions use (row-level
-security doesn't apply to superusers or table owners, so every check switches role)."""
+"""Tenant isolation in the vector tables against a real pgvector database, as the roles the
+functions use (row-level security doesn't apply to superusers or table owners, so every check
+switches role)."""
 
 from __future__ import annotations
 
-import shutil
-import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -16,12 +14,10 @@ import pytest
 from ingest.migrate import activate, status
 from ingest.query import all_tenants, counts, versions
 from ingest.vectorstore.index import ArticleAttributes, PgVectorStore
-from ingest.vectorstore.migrations import apply
 from tests.integration.test_index import rows
 
 pytestmark = pytest.mark.integration
 
-MIGRATIONS = Path(__file__).parents[2] / "db" / "migrations"
 TABLE = "chunks_primary"
 
 
@@ -111,47 +107,3 @@ def test_an_empty_tenant_is_refused(pg: Any) -> None:
     with pytest.raises(psycopg.errors.CheckViolation):
         pg.execute(f"UPDATE {TABLE} SET tenant_id = '' WHERE article_id = 'art_x'")  # noqa: S608
     pg.rollback()
-
-
-def test_migration_005_backfills_existing_rows(pg_url: str, tmp_path: Path) -> None:
-    """Rows written before 005 (no tenant; filters only in metadata) get 'default' and typed
-    columns, and the view keeps serving the table it served."""
-    for path in MIGRATIONS.glob("00[1-4]_*.sql"):
-        shutil.copy(path, tmp_path / path.name)
-    name = f"t_{uuid.uuid4().hex[:12]}"
-    db_url = pg_url.rsplit("/", 1)[0] + f"/{name}"
-    with psycopg.connect(pg_url, autocommit=True) as admin:
-        admin.execute(f'CREATE DATABASE "{name}"')
-    try:
-        with psycopg.connect(db_url) as conn:
-            apply(conn, tmp_path)
-            conn.autocommit = False
-            conn.execute(
-                "INSERT INTO chunks_compact (chunk_id, article_id, doc_version, ordinal,"
-                " is_active, text, embed_text, token_count, metadata, embedding, embedding_model,"
-                " pipeline_version) VALUES ('c1', 'art_1', 1, 0, true, 'old words', 'old words',"
-                " 2, %s::jsonb, %s::halfvec, 'm', 'v1')",
-                (
-                    '{"source": "news", "published_at": "2026-02-03T04:05:06Z"}',
-                    "[" + ",".join(["0.01"] * 512) + "]",
-                ),
-            )
-            activate(conn, "chunks_compact")
-            assert apply(conn, MIGRATIONS) == ["005", *(m.stem[:3] for m in _after_005())]
-            conn.autocommit = False
-            row = conn.execute(
-                "SELECT tenant_id, source, published_at::text FROM chunks_active"
-            ).fetchone()
-            assert row == ("default", "news", "2026-02-03")
-            options = conn.execute(
-                "SELECT reloptions FROM pg_class WHERE relname = 'chunks_active'"
-            ).fetchone()[0]
-            assert "security_invoker=true" in options
-            assert status(conn)["active_table"] == "chunks_compact"
-    finally:
-        with psycopg.connect(pg_url, autocommit=True) as admin:
-            admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-
-
-def _after_005() -> list[Path]:
-    return sorted(p for p in MIGRATIONS.glob("*.sql") if p.name[:3] > "005")

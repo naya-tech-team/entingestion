@@ -1,4 +1,9 @@
-"""Register uploaded objects as articles (brief §6.2)."""
+"""Register uploaded objects as articles.
+
+For each S3 ObjectCreated event: match the key to its upload, claim the upload, verify the object
+(size, SHA-256, type), then make it the article's current version unless a newer ticket already
+did, count the article in its process once, and record the upload's outcome.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +11,7 @@ import base64
 import hashlib
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote_plus
@@ -14,19 +19,17 @@ from urllib.parse import unquote_plus
 import filetype
 from aws_lambda_powertools import Logger
 from botocore.exceptions import ClientError
+from entcommon.authz import AccessPolicy
 
-from producer.authz import AccessPolicy
 from producer.config import Settings
 from producer.models import ArticleStatus, UploadStatus
 from producer.repository import Item, Repository, updated_shard
-from producer.service import UPLOAD_ROW_TTL
 from producer.storage import sha256_hex_to_b64
 from producer.timeutil import date_of, iso, utcnow
 
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
 
-FINISHED_UPLOAD_TTL = timedelta(days=30)
 # Object tag on raw objects no article uses (rejected, superseded): the bucket expires them.
 UNUSED_TAG = "producer-unused"
 HASH_CHUNK = 8 * 1024 * 1024
@@ -112,7 +115,7 @@ class Registrar:
             r"(?P<article_id>art_[0-9A-Za-z]+)/(?P<upload_id>upl_[0-9A-HJKMNP-TV-Z]{26})/[^/]+$"
         )
 
-    def register(self, ref: ObjectRef) -> Result:  # noqa: PLR0911 - one return per §6.2 outcome
+    def register(self, ref: ObjectRef) -> Result:  # noqa: PLR0911 - one return per outcome
         # 1. Only our bucket and raw/art_*/upl_*/<filename> keys.
         if ref.bucket != self.settings.raw_bucket:
             return Result(Outcome.IGNORED, reason="foreign_bucket")
@@ -267,7 +270,7 @@ class Registrar:
             "updated_at": iso(now),
             "updated_date": date_of(now),
             "updated_shard": updated_shard(upload["article_id"], date_of(now)),
-            "upload_seq": upload.get("upload_seq"),
+            "upload_seq": upload["upload_seq"],
         }
         # A re-upload without a title keeps the article's existing one.
         if upload.get("title") is not None:
@@ -293,10 +296,8 @@ class Registrar:
         except ClientError:
             logger.warning("couldn't tag an unused object", extra={"s3_key": ref.key})
 
-    @staticmethod
-    def _row_ttl(now: datetime) -> int:
-        return int((now + UPLOAD_ROW_TTL).timestamp())
+    def _row_ttl(self, now: datetime) -> int:
+        return int((now + self.settings.upload_row_ttl).timestamp())
 
-    @staticmethod
-    def _finished_ttl(now: datetime) -> int:
-        return int((now + FINISHED_UPLOAD_TTL).timestamp())
+    def _finished_ttl(self, now: datetime) -> int:
+        return int((now + self.settings.finished_upload_ttl).timestamp())

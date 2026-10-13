@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ActionResponse } from "./types";
 import {
   allSelected,
   buildRedriveRequest,
@@ -113,16 +114,21 @@ describe("summarizeAction", () => {
     expect(s).toMatchObject({ dryRun: true, count: 2, articleIds: ["a1", "a2"], notFound: ["zz"], queued: null, dlq: null });
   });
 
-  it("reads a real call, a redrive and the older 'missing' key", () => {
+  it("reads a real call and a redrive", () => {
     const s = summarizeAction({
       dry_run: false,
       count: 3,
       queued: 3,
-      missing: ["m1"],
+      not_found: ["m1"],
       error_code: null,
       dlq: { messages: 4, moved: true, task_handle: "h" },
     });
     expect(s).toMatchObject({ dryRun: false, queued: 3, notFound: ["m1"], dlq: { messages: 4, moved: true } });
+  });
+
+  it("reads only not_found (no other key lists unknown ids)", () => {
+    const legacy = { dry_run: true, count: 0, missing: ["m1"] } as unknown as ActionResponse;
+    expect(summarizeAction(legacy).notFound).toEqual([]);
   });
 
   it("knows when there is nothing to do", () => {

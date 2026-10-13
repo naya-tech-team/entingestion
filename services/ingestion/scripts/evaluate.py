@@ -5,7 +5,7 @@ environment.
                                       [--min-recall10 0.6]
 
 Without --table it scores the live table (chunks_active); with one, a reindexed table before
-switching to it (brief §7.3). --baseline also scores the live table on the same golden set and
+switching to it. --baseline also scores the live table on the same golden set and
 prints the difference: the switch (POST /v1/tables/active) needs both reports. --min-recall10
 makes it a gate (exit 1 below the threshold), e.g. in a CI job with AWS credentials.
 """
@@ -17,12 +17,12 @@ import json
 import sys
 
 import boto3
-from gate_phase1 import tf_output
+from _tf import default_env, tf_output
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", default="dev")
+    parser.add_argument("--env", default=default_env())
     parser.add_argument("--table", default=None)
     parser.add_argument("--baseline", action="store_true")
     parser.add_argument("--min-recall10", type=float, default=None)

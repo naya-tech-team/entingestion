@@ -1,4 +1,4 @@
-"""embeddings/vectors.parquet: one row per chunk."""
+"""embeddings/<table>.parquet: one row per chunk."""
 
 from __future__ import annotations
 

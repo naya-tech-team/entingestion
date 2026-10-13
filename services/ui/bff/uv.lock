@@ -92,6 +92,25 @@ wheels = [
 ]
 
 [[package]]
+name = "entingestion-common"
+version = "0.1.0"
+source = { editable = "../../common" }
+dependencies = [
+    { name = "botocore" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "botocore", specifier = ">=1.35" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "botocore-stubs", specifier = ">=1.35" },
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
 name = "iniconfig"
 version = "2.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -277,6 +296,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aws-lambda-powertools" },
     { name = "botocore" },
+    { name = "entingestion-common" },
     { name = "urllib3" },
 ]
 
@@ -292,6 +312,7 @@ dev = [
 requires-dist = [
     { name = "aws-lambda-powertools", specifier = ">=3.0,<4" },
     { name = "botocore", specifier = ">=1.35" },
+    { name = "entingestion-common", editable = "../../common" },
     { name = "urllib3", specifier = ">=2.2,<3" },
 ]
 

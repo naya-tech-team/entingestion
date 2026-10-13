@@ -1,6 +1,7 @@
-"""Step 6: Embed -> embeddings/vectors.parquet. Cache hits skip the model; misses go to the
-table's embedding profile in batches of its batch size (Titan: one text per call), with bounded
-concurrency (also bounded by this function's reserved concurrency: correction 3)."""
+"""Step 6: Embed -> embeddings/<table>.parquet per vector table. Cache hits skip the model;
+misses go to the table's embedding profile in batches of its batch size (Titan: one text per
+call), with bounded concurrency. The function's reserved concurrency bounds the calls across
+runs as well."""
 
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ def embedder(ctx: StepContext, t: Target) -> Embedder:
     return make_embedder(t.profile)
 
 
-@step(StepName.EMBED, input_name=INPUT)
+@step(StepName.EMBED, input_name=INPUT, requires=("cache_table",))
 def handler(ctx: StepContext) -> StepOutput:
     chunks = read_chunks(ctx)
     primary, *others = ctx.targets
@@ -61,7 +62,7 @@ def _embed_into(
 ) -> tuple[StagedObject, dict[str, Any]]:
     s = ctx.settings
     keys = {c.chunk_id: t.cache_key(c.embed_text) for c in chunks}
-    cache = EmbeddingCache(aws.dynamodb(), aws.table(s.cache_table), s.cache_ttl_days)
+    cache = EmbeddingCache(aws.dynamodb(), aws.table(s.cache_table), s.retention.cache_ttl_days)
     cached = cache.get_many(keys.values())
     misses = [c for c in chunks if keys[c.chunk_id] not in cached]
 
@@ -78,7 +79,7 @@ def _embed_into(
     # Cache every result as it arrives, even after a call has failed, so a retry pays the model
     # only for what is left.
     failure: BaseException | None = None
-    with ThreadPoolExecutor(max_workers=max(1, s.embed_concurrency)) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, s.embedding.concurrency)) as pool:
         futures = {
             pool.submit(model.embed_documents, [c.embed_text for c in batch]): batch
             for batch in batches

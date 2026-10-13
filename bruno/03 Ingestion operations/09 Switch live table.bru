@@ -12,7 +12,7 @@ post {
 
 body:json {
   {
-    "table": "chunks_compact"
+    "table": "{{newTable}}"
   }
 }
 
@@ -31,5 +31,5 @@ tests {
 }
 
 docs {
-  Points `chunks_active` at the table. Refused (409) unless live runs write it, every indexed article is in it, and its newest evaluation (within 7 days) is no worse than the live table's; `force: true` overrides. Run again with the old table to roll back.
+  Points `chunks_active` at `newTable`. Refused (409) unless live runs write it, every indexed article is in it, and its newest evaluation (within 7 days) is no worse than the live table's; `force: true` overrides. Run again with the old table to roll back.
 }

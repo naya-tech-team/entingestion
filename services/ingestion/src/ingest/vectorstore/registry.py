@@ -1,4 +1,4 @@
-"""Which vector tables runs write, and which one search reads (brief §7.3), per tenant.
+"""Which vector tables runs write, and which one search reads, per tenant.
 
 Small items in ingestion_status:
 
@@ -30,14 +30,16 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from botocore.exceptions import ClientError
+from entcommon.dynamo import is_condition_failure
+from entcommon.timeutil import iso_now
 
 from ingest.errors import ErrorCode, make_error
 from ingest.status import keys
-from ingest.timeutil import iso_now
 from ingest.vectorstore.targets import TARGETS, profile_table
 
 if TYPE_CHECKING:
-    from ingest.status.store import StatusStore
+    # The reads part of the status store is all a registry needs (the store passes itself).
+    from ingest.status.reads import ReadsMixin as StatusReads
 
 NAME = "VECTOR_TABLES"
 DEFAULT_TENANT = "default"  # articles without a tenant (ingest.vectorstore.index)
@@ -77,7 +79,7 @@ def _from_item(item: dict[str, Any], tenant: str | None) -> VectorTables:
     return VectorTables(live, (live, *writes), int(item.get("epoch", 0)), tenant)
 
 
-def load_default(store: StatusStore) -> VectorTables:
+def load_default(store: StatusReads) -> VectorTables:
     item = store.get_config(NAME)
     if not item:
         live = store.settings.target_table
@@ -85,33 +87,41 @@ def load_default(store: StatusStore) -> VectorTables:
     return _from_item(item, None)
 
 
-def load(store: StatusStore, tenant: str | None = None) -> VectorTables:
+def recorded_live(store: StatusReads) -> str | None:
+    """The default registry's live table if a change recorded one, else None (a new environment,
+    where chunks_active serves the default profile's table). migrate reads it, so a rebuilt
+    database serves the same table as the registry."""
+    item = store.get_config(NAME)
+    return str(item["live"]) if item else None
+
+
+def load(store: StatusReads, tenant: str | None = None) -> VectorTables:
     """The registry that governs `tenant`: its own, else the default one (tenant None)."""
     t = scope(tenant)
     if t is not None:
         item = store.get_config(config_name(t))
         if item:
             return _from_item(item, t)
-        profile = store.settings.tenant_profiles.get(t)
+        profile = store.settings.embedding.tenants.get(t)
         if profile:
             table = profile_table(profile)
             return VectorTables(table, (table,), 0, t)
     return load_default(store)
 
 
-def load_all(store: StatusStore) -> dict[str | None, VectorTables]:
+def load_all(store: StatusReads) -> dict[str | None, VectorTables]:
     """Every registry: the default one (key None) and each tenant's own."""
     out: dict[str | None, VectorTables] = {None: load_default(store)}
     for item in store.configs(f"{NAME}#"):
         tenant = str(item["sk"]).removeprefix(f"{NAME}#")
         out[tenant] = _from_item(item, tenant)
-    for tenant in store.settings.tenant_profiles:
+    for tenant in store.settings.embedding.tenants:
         if scope(tenant) is not None and tenant not in out:
             out[tenant] = load(store, tenant)
     return out
 
 
-def _save(store: StatusStore, current: VectorTables, new: VectorTables, by: str) -> VectorTables:
+def _save(store: StatusReads, current: VectorTables, new: VectorTables, by: str) -> VectorTables:
     """Store `new` for its tenant. A tenant's first own registry (copied from the default one or
     from TENANT_PROFILES) must not exist yet; later changes need the epoch they started from."""
     condition: dict[str, Any] = {"ConditionExpression": "attribute_not_exists(pk)"}
@@ -131,7 +141,7 @@ def _save(store: StatusStore, current: VectorTables, new: VectorTables, by: str)
             **condition,
         )
     except ClientError as err:
-        if err.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+        if is_condition_failure(err):
             raise make_error(ErrorCode.DB_CONFLICT, "vector tables changed concurrently") from err
         raise
     return new
@@ -142,7 +152,7 @@ def _known(table: str) -> None:
         raise RegistryError(f"unknown table {table!r}; known: {sorted(TARGETS)}")
 
 
-def add_write(store: StatusStore, table: str, by: str, tenant: str | None = None) -> VectorTables:
+def add_write(store: StatusReads, table: str, by: str, tenant: str | None = None) -> VectorTables:
     """Start writing `table` from the tenant's live runs too (before its reindex)."""
     _known(table)
     current = load(store, tenant)
@@ -155,7 +165,7 @@ def add_write(store: StatusStore, table: str, by: str, tenant: str | None = None
 
 
 def remove_write(
-    store: StatusStore, table: str, by: str, tenant: str | None = None
+    store: StatusReads, table: str, by: str, tenant: str | None = None
 ) -> VectorTables:
     """Stop writing `table` for the tenant (retire an old table, or cancel a model change)."""
     current = load(store, tenant)
@@ -168,7 +178,7 @@ def remove_write(
     return _save(store, current, VectorTables(current.live, writes, current.epoch + 1, owner), by)
 
 
-def set_live(store: StatusStore, table: str, by: str, tenant: str | None = None) -> VectorTables:
+def set_live(store: StatusReads, table: str, by: str, tenant: str | None = None) -> VectorTables:
     """Record the switch (for the default registry: after chunks_active points at `table`). The
     old live table stays written, so switching back is exact."""
     current = load(store, tenant)

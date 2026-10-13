@@ -1,1 +1,2 @@
-"""The nine pipeline steps (brief §4.4), one Lambda handler each."""
+"""The nine pipeline steps (Claim, Fetch, Extract, Normalize, Chunk, Embed, Validate, Index,
+Finalize), one Lambda handler each."""

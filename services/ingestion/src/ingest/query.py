@@ -18,15 +18,18 @@ Functions outside the VPC (no NAT, so no Bedrock or SQS from inside) call it wit
                                                         chunks) in article order (drift check)
 
 "table" picks a registered vector table instead of the live view, e.g. to evaluate a reindexed
-table before switching to it (brief §7.3).
+table before switching to it.
 
-Row-level security (migration 005) shows ingest_reader one tenant at a time: search_hybrid sets
+Row-level security (each vector table's policies, ingest.vectorstore.profile_tables) shows
+ingest_reader one tenant at a time: search_hybrid sets
 app.tenant_id for its transaction (and filters on it too). describe, search, counts and versions
 are internal (evaluation, drift check) and read every tenant (app.all_tenants). Settings are
 SET LOCAL: they end with the transaction, which every call rolls back.
 
-HNSW search: ef_search = max(100, 2 x candidates), with iterative scans (pgvector 0.8) so a
-filtered query still finds enough rows; the default ef_search of 40 can't return k = 50.
+HNSW search: ef_search = 2 x candidates within [SEARCH_MIN_EF_SEARCH, SEARCH_MAX_EF_SEARCH]
+(100 and 1000 by default), with iterative scans (pgvector 0.8) so a filtered query still finds
+enough rows; the default ef_search of 40 can't return k = 50. Fusion: score = sum(1 / (SEARCH_RRF_K
++ rank)) over the vector and keyword lists of at least SEARCH_MIN_POOL candidates each.
 """
 
 from __future__ import annotations
@@ -38,19 +41,16 @@ from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from psycopg import sql
 
-from ingest.config import get_settings
+from ingest.config import get_settings, require
 from ingest.vectorstore.db import connection
 from ingest.vectorstore.targets import TARGETS
 
 logger = Logger()
 
+REQUIRED = ("db.host",)
 LIVE_VIEW = "chunks_active"
 MAX_K = 200
 MAX_HYBRID_K = 100
-RRF_K = 60  # reciprocal rank fusion: score = sum(1 / (RRF_K + rank)) over the two lists
-MIN_EF_SEARCH = 100
-MAX_EF_SEARCH = 1000  # pgvector's limit
-MIN_POOL = 50  # candidates per list (vector, keyword) before fusion
 
 
 def _relation(table: str | None) -> sql.Composable:
@@ -82,7 +82,8 @@ def one_tenant(conn: Any, tenant_id: str) -> None:
 def tune(conn: Any, candidates: int) -> None:
     """HNSW settings for this transaction: enough candidates for `candidates` results, and
     iterative scans so filters (tenant, source, dates) don't starve the result."""
-    ef = min(max(MIN_EF_SEARCH, 2 * candidates), MAX_EF_SEARCH)
+    knobs = get_settings().search
+    ef = min(max(knobs.min_ef_search, 2 * candidates), knobs.max_ef_search)
     conn.execute(
         "SELECT set_config('hnsw.ef_search', %s, true),"
         " set_config('hnsw.iterative_scan', 'relaxed_order', true)",
@@ -194,7 +195,8 @@ def search_hybrid(
     if not tenant_id:
         raise ValueError("search_hybrid needs a tenant_id")
     k = max(1, min(int(k), MAX_HYBRID_K))
-    pool = max(2 * k, MIN_POOL)
+    knobs = get_settings().search
+    pool = max(2 * k, knobs.min_pool)
     one_tenant(conn, tenant_id)
     tune(conn, pool)
     filters = filters or {}
@@ -204,7 +206,7 @@ def search_hybrid(
         "vector": _literal(vector),
         "text": text,
         "pool": pool,
-        "rrf": RRF_K,
+        "rrf": knobs.rrf_k,
         "k": k,
     }
     if table is not None:
@@ -266,7 +268,7 @@ _INTERNAL = ("describe", "search", "counts", "versions")
 
 @logger.inject_lambda_context(clear_state=True)
 def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
-    conn = connection(get_settings())
+    conn = connection(require(*REQUIRED))
     action = event.get("action")
     conn.rollback()  # a warm connection starts clean: no settings left from an earlier call
     try:

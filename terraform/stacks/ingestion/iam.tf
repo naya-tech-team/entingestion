@@ -1,4 +1,4 @@
-# One least-privilege policy per function (brief §8.3). Producer resources are read-only.
+# One least-privilege policy per function. Producer resources are read-only.
 
 locals {
   state_machine_name = "${local.name_prefix}-ingest"
@@ -11,15 +11,15 @@ locals {
   tables_function_arn        = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.tables_function_name}"
   query_function_name        = "${local.name_prefix}-query"
   query_function_arn         = "arn:${local.partition}:lambda:${local.region}:${local.account_id}:function:${local.query_function_name}"
-  # The alias callers invoke (modules/lambda_function). Grants name it and the unqualified
-  # function: code from before the alias still calls the function by name until it's replaced.
+  # The alias callers invoke (modules/lambda_function): every caller names it (<name>:live in
+  # their environment), so the grants are for the alias only.
   fn_alias           = "live"
-  tables_invoke_arns = [local.tables_function_arn, "${local.tables_function_arn}:${local.fn_alias}"]
-  query_invoke_arns  = [local.query_function_arn, "${local.query_function_arn}:${local.fn_alias}"]
+  tables_invoke_arns = ["${local.tables_function_arn}:${local.fn_alias}"]
+  query_invoke_arns  = ["${local.query_function_arn}:${local.fn_alias}"]
   event_bus_arn      = "arn:${local.partition}:events:${local.region}:${local.account_id}:event-bus/default"
   rerank_model_arn   = "arn:${local.partition}:bedrock:${local.region}::foundation-model/${var.rerank_model_id}"
   # The producer's per-source access policy (search authorization, PII policy), published to SSM.
-  source_access_parameter     = "${var.producer_ssm_prefix}/source_access"
+  source_access_parameter     = "${local.producer_ssm_prefix}/source_access"
   source_access_parameter_arn = "arn:${local.partition}:ssm:${local.region}:${local.account_id}:parameter${local.source_access_parameter}"
 }
 
@@ -89,8 +89,8 @@ data "aws_iam_policy_document" "producer_raw_read" {
 
 data "aws_iam_policy_document" "producer_rows_read" {
   statement {
-    sid       = "ProducerRows" # BatchGetItem: tenants of articles from before LATEST had them
-    actions   = ["dynamodb:GetItem", "dynamodb:BatchGetItem"]
+    sid       = "ProducerRows"
+    actions   = ["dynamodb:GetItem"]
     resources = [local.producer.articles_table_arn, local.producer.process_table_arn]
   }
 
@@ -309,6 +309,19 @@ data "aws_iam_policy_document" "mark_failed" {
 }
 
 data "aws_iam_policy_document" "migrate" {
+  # chunks_active follows the default registry's live table: GetItem on the #CONFIG items only.
+  statement {
+    sid       = "RegistryRead"
+    actions   = ["dynamodb:GetItem"]
+    resources = [module.status_table.arn]
+
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["#CONFIG"]
+    }
+  }
+
   statement {
     sid       = "MasterSecret"
     actions   = ["secretsmanager:GetSecretValue"]
@@ -322,7 +335,7 @@ data "aws_iam_policy_document" "migrate" {
   }
 }
 
-# -- OCR (Textract async, brief §4.4) -------------------------------------------------
+# -- OCR (Textract async) ------------------------------------------------------------
 # Textract reads the producer's object and writes its result to staging with the caller's
 # permissions (forward access sessions), so ocr_start holds both.
 
@@ -578,9 +591,9 @@ data "aws_iam_policy_document" "eval" {
   }
 
   statement {
-    sid       = "GoldenSet" # versioned sets + LATEST; the article-only set from before them
+    sid       = "GoldenSet" # versioned sets and LATEST
     actions   = ["s3:GetObject"]
-    resources = ["${module.staging.arn}/_eval/golden/*", "${module.staging.arn}/_eval/golden.jsonl"]
+    resources = ["${module.staging.arn}/_eval/golden/*"]
   }
 
   statement {
@@ -591,7 +604,7 @@ data "aws_iam_policy_document" "eval" {
     condition {
       test     = "StringLike"
       variable = "s3:prefix"
-      values   = ["_eval/golden/*", "_eval/golden.jsonl"]
+      values   = ["_eval/golden/*"]
     }
   }
 
@@ -623,12 +636,9 @@ data "aws_iam_policy_document" "reconciler" {
   ]
 
   statement {
-    sid     = "ProducerUpdatedIndex" # read-only: drift check over gsi_updated(_shard)
-    actions = ["dynamodb:Query"]
-    resources = [
-      "${local.producer.articles_table_arn}/index/gsi_updated",
-      "${local.producer.articles_table_arn}/index/gsi_updated_shard",
-    ]
+    sid       = "ProducerUpdatedIndex" # read-only: drift check over gsi_updated_shard
+    actions   = ["dynamodb:Query"]
+    resources = ["${local.producer.articles_table_arn}/index/gsi_updated_shard"]
   }
 
   statement {
@@ -638,7 +648,7 @@ data "aws_iam_policy_document" "reconciler" {
   }
 
   statement {
-    sid       = "ChunkCounts" # weekly drift check (brief §11.6)
+    sid       = "ChunkCounts" # weekly drift check: chunk counts per article
     actions   = ["lambda:InvokeFunction"]
     resources = local.query_invoke_arns
   }
@@ -714,9 +724,9 @@ locals {
 }
 
 # Plan-time warning if a role misses the boundary (the deploy role's CreateRole would fail).
-check "roles_carry_the_workload_boundary" {
-  assert {
-    condition     = alltrue([for b in local.role_permissions_boundaries : coalesce(b, "none") == coalesce(local.permissions_boundary, "none")])
-    error_message = "A role in this stack doesn't carry the workload boundary (local.permissions_boundary)."
-  }
+module "boundary_check" {
+  source = "../../modules/boundary_check"
+
+  boundaries = local.role_permissions_boundaries
+  expected   = local.permissions_boundary
 }

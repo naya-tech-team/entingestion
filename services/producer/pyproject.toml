@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.9,<3",
     "python-ulid>=3.0,<4",
     "filetype>=1.2,<2",  # MIT: magic-number checks of uploaded files
+    "entingestion-common",  # services/common (path source below)
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/producer", "client/producer_client"]
+
+[tool.uv.sources]
+# Shared code (services/common); the Lambda builds install it next to the hash-locked deps.
+entingestion-common = { path = "../common", editable = true }
 
 [tool.ruff]
 line-length = 100

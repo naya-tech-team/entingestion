@@ -1,4 +1,4 @@
-"""S3 client configuration and presigned upload URLs (brief §6.1)."""
+"""S3 client configuration and presigned upload URLs."""
 
 from __future__ import annotations
 
@@ -13,16 +13,18 @@ from botocore.config import Config
 if TYPE_CHECKING:
     from mypy_boto3_s3.client import S3Client
 
-# Mandatory (brief §6.1.6): without these, newer botocore adds a CRC32 checksum requirement
+# Mandatory: without these, newer botocore adds a CRC32 checksum requirement
 # to presigned URLs and plain client PUTs fail.
 # addressing_style="virtual" presigns against the regional host (bucket.s3.<region>.amazonaws.com).
 # The default uses the global host, which S3 307-redirects to the regional one for new buckets;
 # the redirected request's Host no longer matches the signature (SignatureDoesNotMatch).
+# us_east_1_regional_endpoint keeps it regional in us-east-1 too, where botocore would otherwise
+# use bucket.s3.amazonaws.com: the upload UI's CSP allows only the regional host.
 S3_CLIENT_CONFIG = Config(
     signature_version="s3v4",
     request_checksum_calculation="when_required",
     response_checksum_validation="when_required",
-    s3={"addressing_style": "virtual"},
+    s3={"addressing_style": "virtual", "us_east_1_regional_endpoint": "regional"},
 )
 
 

@@ -2,22 +2,13 @@
 
 from __future__ import annotations
 
-import os
-import re
 from dataclasses import dataclass
 from functools import lru_cache
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, urlencode
 
 import botocore.session
 import urllib3
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
-
-# CloudFront gives the origin 30 s; Lambda is stopped at its own timeout just under that.
-CONNECT_TIMEOUT = 3.0
-READ_TIMEOUT = 25.0
-
-_EXECUTE_API_HOST = re.compile(r"\.execute-api\.([a-z0-9-]+)\.amazonaws\.com$", re.IGNORECASE)
+from entcommon.sigv4 import signed_headers
 
 
 class UpstreamError(Exception):
@@ -41,15 +32,6 @@ def _pool() -> urllib3.PoolManager:
     return urllib3.PoolManager(num_pools=4, maxsize=10)
 
 
-def region_of(url: str) -> str:
-    """The API's region from its execute-api host, else the function's own region."""
-    host = urlsplit(url).hostname or ""
-    match = _EXECUTE_API_HOST.search(host)
-    if match:
-        return match.group(1)
-    return os.environ.get("AWS_REGION") or os.environ["AWS_DEFAULT_REGION"]
-
-
 def build_url(base_url: str, path: str, query: list[tuple[str, str]] | None = None) -> str:
     """base_url (the stage invoke URL) + path, with the query RFC 3986-encoded as SigV4 expects."""
     url = base_url.rstrip("/") + path
@@ -63,29 +45,27 @@ def call(
     base_url: str,
     path: str,
     *,
+    timeout: urllib3.Timeout,
     query: list[tuple[str, str]] | None = None,
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> UpstreamResponse:
-    """Sign the request with the function role's credentials and send it (no retries)."""
+    """Sign the request with the function role's credentials and send it (no retries). The
+    region comes from the execute-api host, else the function's own (AWS_REGION)."""
     url = build_url(base_url, path, query)
-    request = AWSRequest(
-        method=method,
-        url=url,
-        data=body or b"",
-        headers={"host": urlsplit(url).netloc, "accept": "application/json", **(headers or {})},
-    )
     credentials = _session().get_credentials()
     if credentials is None:
         raise RuntimeError("no AWS credentials for signing")
-    SigV4Auth(credentials.get_frozen_credentials(), "execute-api", region_of(url)).add_auth(request)
+    signed = signed_headers(
+        method, url, body, credentials, {"accept": "application/json", **(headers or {})}
+    )
     try:
         response = _pool().request(
             method,
             url,
             body=body,
-            headers=dict(request.headers.items()),
-            timeout=urllib3.Timeout(connect=CONNECT_TIMEOUT, read=READ_TIMEOUT),
+            headers=signed,
+            timeout=timeout,
             retries=False,
             redirect=False,
         )

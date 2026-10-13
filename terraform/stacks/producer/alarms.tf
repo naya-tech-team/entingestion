@@ -1,4 +1,4 @@
-# Alarms (brief §7.3) -> SNS topic (KMS) -> email subscriptions (required in prod), on ALARM only.
+# Alarms -> SNS topic (KMS) -> email subscriptions (required in prod), on ALARM only.
 
 module "alarms" {
   source = "../../modules/alarms"

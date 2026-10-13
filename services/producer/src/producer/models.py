@@ -1,4 +1,4 @@
-"""API request and response models (brief §4, §5)."""
+"""API request and response models."""
 
 from __future__ import annotations
 
@@ -166,8 +166,8 @@ class Process(_Response):
     rejected_count: int = 0  # uploads rejected
     superseded_count: int = 0  # uploads a newer upload of the same article overtook
     expired_count: int = 0  # tickets never used (no object arrived)
-    tickets_issued: int | None = None  # uploads requested (None: created before it was tracked)
-    pending_uploads: int | None = None  # tickets not yet registered, rejected, superseded, expired
+    tickets_issued: int = 0  # uploads requested
+    pending_uploads: int = 0  # tickets not yet registered, rejected, superseded or expired
     metadata: dict[str, str] = Field(default_factory=dict)
     created_by: str
     created_at: str
@@ -181,8 +181,6 @@ class Process(_Response):
             {
                 "status": self.status,
                 "expected_count": self.expected_count,
-                "registered_count": self.registered_count,
-                "rejected_count": self.rejected_count,
                 "tickets_issued": self.tickets_issued,
                 "pending_uploads": self.pending_uploads,
             }
@@ -190,18 +188,13 @@ class Process(_Response):
 
 
 def is_settled(process: dict[str, Any]) -> bool:
-    """CLOSED, and every upload has an outcome. Since uploads are counted, that means no ticket
-    is still pending and at least expected_count tickets were issued; older processes fall back
-    to registered + rejected >= expected_count. Ingestion applies the same rule."""
+    """CLOSED, and every upload has an outcome: no ticket is still pending and at least
+    expected_count tickets were issued. Ingestion applies the same rule."""
     expected = process.get("expected_count")
     if process.get("status") != ProcessStatus.CLOSED or expected is None:
         return False
-    if process.get("tickets_issued") is not None:
-        return int(process.get("pending_uploads") or 0) <= 0 and int(
-            process["tickets_issued"]
-        ) >= int(expected)
-    registered = int(process.get("registered_count") or 0)
-    return registered + int(process.get("rejected_count") or 0) >= int(expected)
+    pending = int(process.get("pending_uploads") or 0)
+    return pending <= 0 and int(process.get("tickets_issued") or 0) >= int(expected)
 
 
 class UploadTicket(_Response):

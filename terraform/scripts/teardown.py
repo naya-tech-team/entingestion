@@ -246,9 +246,8 @@ def teardown(args: argparse.Namespace) -> int:
     for address in [*plan.clusters, *plan.tables]:
         if address in in_state:
             runner.terraform("state", "rm", address)
-    runner.terraform(
-        "destroy", "-input=false", "-auto-approve", f"-var-file={args.var_file}", stream=True
-    )
+    var_files = [f"-var-file={f}" for f in args.var_file]
+    runner.terraform("destroy", "-input=false", "-auto-approve", *var_files, stream=True)
 
     # 6. Tables last
     for name in plan.tables.values():
@@ -266,7 +265,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--env", required=True)
     parser.add_argument("--stack", required=True)
-    parser.add_argument("--var-file", required=True, help="relative to the stack directory")
+    parser.add_argument(
+        "--var-file",
+        required=True,
+        action="append",
+        help="relative to the stack directory; repeat for several, later ones win",
+    )
     parser.add_argument(
         "--root",
         type=Path,

@@ -35,7 +35,7 @@ def ticket_body(**overrides: Any) -> dict[str, Any]:
 
 
 def put_article(article_id: str, process_id: str, updated_at: str, **extra: Any) -> None:
-    """Articles are written by the registrar (Phase 2); tests seed them directly, with the
+    """Articles are written by the registrar; tests seed them directly, with the
     process membership marker the registrar writes."""
     boto3.resource("dynamodb", region_name=REGION).Table("producer_uploads").put_item(
         Item={
@@ -81,6 +81,7 @@ def test_create_and_get_process(api: ApiCall) -> None:
     assert created["status"] == "OPEN"
     assert created["registered_count"] == 0
     assert created["rejected_count"] == 0
+    assert (created["tickets_issued"], created["pending_uploads"]) == (0, 0)
     assert created["expected_count"] == 3
     assert created["created_by"] == CALLER_ARN
     assert created["settled"] is False
@@ -237,7 +238,7 @@ def test_pending_uploads_outlive_the_registrar_dlq(api: ApiCall) -> None:
     # expires with the presigned URL, and the janitor settles it if nothing arrived.
     assert abs(int(item["expires_at_epoch"]) - 15 * 86400 - time.time()) < 60
     assert abs(int(item["ticket_expires_epoch"]) - 900 - time.time()) < 60
-    assert (item["pending"], item["counted"], int(item["upload_seq"])) == ("P", True, 1)
+    assert (item["pending"], int(item["upload_seq"])) == ("P", 1)
 
 
 def test_client_put_with_ticket_headers_succeeds(api: ApiCall) -> None:
@@ -411,3 +412,15 @@ def test_list_articles_query_validation(api: ApiCall, query: dict[str, str]) -> 
 
 def test_list_articles_unknown_process_is_404(api: ApiCall) -> None:
     assert api("GET", "/v1/processes/prc_missing/articles").status == 404
+
+
+def test_the_api_needs_its_idempotency_table(api: ApiCall, monkeypatch: pytest.MonkeyPatch) -> None:
+    from producer.api import get_service
+    from producer.config import MissingSetting, get_settings
+
+    monkeypatch.delenv("IDEMPOTENCY_TABLE")
+    get_settings.cache_clear()
+    get_service.cache_clear()
+
+    with pytest.raises(MissingSetting, match="IDEMPOTENCY_TABLE"):
+        api("GET", "/v1/sources")

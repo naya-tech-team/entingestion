@@ -1,4 +1,4 @@
-"""Acceptance checks against a deployed environment (brief §16): DUP and CONC.
+"""Acceptance checks against a deployed environment: DUP and CONC (docs/USE_CASES.md).
 
     uv run python scripts/acceptance.py [dup|conc|all] [--env dev]
 
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -24,12 +25,13 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import boto3
+from _tf import ROOT, default_env, tf_output
 from boto3.dynamodb.types import TypeDeserializer
-from gate_phase1 import ROOT, tf_output
 
 from ingest.ids import new_run_id
 
-SOURCE = "acceptance"
+# The producer source the acceptance scenarios upload to (the producer must know it).
+SOURCE = os.environ.get("ACCEPTANCE_SOURCE", "acceptance")
 _DESERIALIZER = TypeDeserializer()
 POLL_S = 5
 
@@ -45,10 +47,7 @@ class Env:
         self.state_machine = out("state_machine_arn")
         self.ingest_queue = out("ingest_queue_url")
         self.api_url = tf_output("producer", env, "api_url")
-        fn = boto3.client("lambda").get_function_configuration(
-            FunctionName=f"ingestion-{env}-finalize"
-        )
-        self.articles_table = fn["Environment"]["Variables"]["PRODUCER_ARTICLES_TABLE"]
+        self.articles_table = tf_output("producer", env, "articles_table_name")
 
     def item(self, pk: str, sk: str) -> dict[str, Any]:
         resp = self.ddb.get_item(
@@ -227,7 +226,7 @@ def conc(env: Env, article_id: str, pid: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("which", nargs="?", default="all", choices=["dup", "conc", "all"])
-    parser.add_argument("--env", default="dev")
+    parser.add_argument("--env", default=default_env())
     parser.add_argument("--article-id", help="conc only: an INDEXED article")
     parser.add_argument("--process-id", help="conc only: its process")
     args = parser.parse_args()

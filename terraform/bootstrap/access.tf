@@ -19,8 +19,9 @@ locals {
   partition        = data.aws_partition.current.partition
   iam_arn          = "arn:${local.partition}:iam::${var.aws_account_id}"
 
-  # deploy_principal_arns may be relative to the account ("user/<name>"); derive the full ARN.
-  deploy_principals = [for p in var.deploy_principal_arns : startswith(p, "arn:") ? p : "${local.iam_arn}:${p}"]
+  # deploy_principal_arns may be relative to the account ("user/<name>"); module.env derives the
+  # full ARN the way the stacks do (the same in every environment).
+  deploy_principals = module.env[var.environments[0]].expanded_principals["deploy"]
 
   # Who is applying, as the principal the state-bucket policy sees (an assumed-role session
   # counts as its role).
@@ -28,7 +29,8 @@ locals {
   "/^arn:([^:]+):sts::([0-9]{12}):assumed-role/([^/]+)/.*$/", "arn:$1:iam::$2:role/$3")
 
   # Computed rather than referenced, so the deploy boundary doesn't wait on the policy resource.
-  workload_boundary_arns = { for env in var.environments : env => "${local.iam_arn}:policy/entingestion-${env}-workload-boundary" }
+  # The stacks derive the same ARN (modules/stack_common).
+  workload_boundary_arns = { for env in var.environments : env => module.env[env].permissions_boundary }
   other_envs             = { for env in var.environments : env => sort(tolist(setsubtract(var.environments, [env]))) }
 
   # Resources of an environment by name, for services whose actions don't all support the env
@@ -60,6 +62,19 @@ locals {
 }
 
 data "aws_partition" "current" {}
+
+# Per environment, what the stacks derive: the workload boundary's name and ARN, and principal ARNs.
+module "env" {
+  source   = "../modules/stack_common"
+  for_each = toset(var.environments)
+
+  stack          = "entingestion"
+  env            = each.key
+  aws_account_id = var.aws_account_id
+  partition      = local.partition
+  mandatory_tags = var.mandatory_tags
+  principals     = { deploy = var.deploy_principal_arns }
+}
 
 data "aws_caller_identity" "current" {}
 
@@ -478,7 +493,7 @@ data "aws_iam_policy_document" "workload_boundary" {
 resource "aws_iam_policy" "workload_boundary" {
   for_each = toset(var.environments)
 
-  name        = "entingestion-${each.key}-workload-boundary"
+  name        = module.env[each.key].boundary_policy_name
   description = "Caps every role the ${each.key} stacks create: no IAM, account, trail or state access, no other environments."
   policy      = data.aws_iam_policy_document.workload_boundary[each.key].json
 }

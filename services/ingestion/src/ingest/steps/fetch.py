@@ -57,9 +57,9 @@ def _route_large(ctx: StepContext) -> int | None:
     size = int(aws.s3().head_object(**args)["ContentLength"])
     if size <= ctx.settings.lambda_max_source_bytes:
         return None
-    if not ctx.settings.ocr_enabled:
+    if not ctx.settings.ocr.enabled:
         raise make_error(ErrorCode.TOO_LARGE, f"{size} bytes exceeds the Lambda limit (OCR off)")
-    if size > ctx.settings.ocr_max_bytes:
+    if size > ctx.settings.ocr.max_bytes:
         raise make_error(ErrorCode.TOO_LARGE, f"{size} bytes exceeds the OCR limit")
     body = aws.s3().get_object(**args)["Body"]
     digest = hashlib.sha256()
@@ -79,7 +79,7 @@ def _route_large(ctx: StepContext) -> int | None:
 @step(StepName.FETCH)
 def handler(ctx: StepContext) -> StepOutput:
     large = _route_large(ctx)
-    if large is not None:  # a big PDF: Textract reads it from S3 (brief §4.4 route)
+    if large is not None:  # a big PDF: Textract reads it from S3 (the OCR route)
         return StepOutput(
             metrics={"bytes": large, "kind": "pdf", "route": "OCR"},
             result={"kind": "pdf", "route": "OCR"},

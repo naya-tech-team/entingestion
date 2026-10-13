@@ -1,10 +1,11 @@
 """tables Lambda: the vector-table operations behind the control API's /v1/tables routes
-(brief §7.3), from inside the VPC as ingest_ops (IAM auth, no master credentials):
+from inside the VPC as ingest_ops (IAM auth, no master credentials):
 
     {"action": "status"}                                 live table + row counts per table
     {"action": "activate", "table": "chunks_compact"} switch chunks_active (also rollback)
 
-ingest_ops can read the vector tables and act as the view's owner (ingest_views, migration 004);
+ingest_ops can read the vector tables and act as the view's owner (ingest_views, see
+db/migrations/001_schema.sql);
 it can't write rows or change the schema. Migrations and truncate stay in the migrate function.
 """
 
@@ -15,11 +16,12 @@ from typing import Any
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
-from ingest.config import get_settings
+from ingest.config import require
 from ingest.migrate import activate, known_table, status
 from ingest.vectorstore.db import connection
 
 logger = Logger()
+REQUIRED = ("db.host",)
 
 
 @logger.inject_lambda_context(clear_state=True)
@@ -28,7 +30,7 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     if action not in ("status", "activate"):
         raise ValueError(f"unknown action {action!r}; expected status or activate")
     table = known_table(event) if action == "activate" else ""
-    conn = connection(get_settings())
+    conn = connection(require(*REQUIRED))
     conn.rollback()  # a warm connection starts clean
     try:
         if action == "status":

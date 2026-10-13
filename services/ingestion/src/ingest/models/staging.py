@@ -1,4 +1,4 @@
-"""Documents written to the staging bucket between steps (brief §5)."""
+"""Documents written to the staging bucket between steps."""
 
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ class CheckResult(_Staged):
 
 
 class Manifest(_Staged):
-    """_manifest.json, written by Validate; Index refuses anything without passed=True."""
+    """_manifest.<table>.json, written by Validate; Index refuses anything without passed=True."""
 
     article_id: str
     doc_version: int

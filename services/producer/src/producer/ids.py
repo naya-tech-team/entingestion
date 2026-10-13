@@ -1,4 +1,4 @@
-"""Identifier generation (brief §5)."""
+"""Identifier generation: prefixed ULIDs, and deterministic article ids."""
 
 from __future__ import annotations
 

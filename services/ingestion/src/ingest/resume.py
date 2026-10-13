@@ -1,4 +1,4 @@
-"""Where a re-run can start (brief §10, resume logic).
+"""Where a re-run can start (resume: replays and redrives skip the steps still intact).
 
 The last SUCCEEDED step of the article's previous run whose staged output still has the ETag it
 recorded: the run starts at the step after it. Fetch writes nothing to staging (it verifies the

@@ -1,9 +1,10 @@
 # entingestion documentation
 
-entingestion turns uploaded documents into searchable, versioned chunks in PostgreSQL with pgvector. It has two services, each deployed as its own Terraform stack:
+entingestion turns uploaded documents into searchable, versioned chunks in PostgreSQL with pgvector. It has three services, each deployed as its own Terraform stack:
 
 - **Producer.** Clients register a batch (a *process*), upload files straight to S3 with presigned URLs, and get one verified row per document in the DynamoDB `articles` table.
-- **Ingestion pipeline.** It consumes the `articles` stream. For every article version it fetches, extracts, normalizes, chunks, embeds (Amazon Bedrock Titan v2), validates and indexes the text. It keeps status per article, run and step, and stages every step's output in S3.
+- **Ingestion pipeline.** It consumes the `articles` stream. For every article version it fetches, extracts, normalizes, chunks, embeds (with the models configured as embedding profiles in the tfvars, on Amazon Bedrock or an OpenAI-compatible endpoint), validates and indexes the text. It keeps status per article, run and step, and stages every step's output in S3.
+- **Upload UI.** A hosted page for uploading a batch and following it to `INDEXED`, with an Operations tab ([UI.md](UI.md)).
 
 ![System overview](diagrams/png/01-overview.png)
 
@@ -36,7 +37,7 @@ entingestion turns uploaded documents into searchable, versioned chunks in Postg
 | 7. Model change and rebuild | Reindex state machine, backfill, evaluate, switch, roll back |
 | 8. Operations | Reconciler steps, alerts, dashboard, control API routes |
 | 9. Network and security | VPC, endpoints, security groups, IAM, KMS |
-| 10. Delivery and teardown | Build → plan → apply → migrate → smoke; CI; `make destroy` |
+| 10. Delivery and teardown | Build → plan → apply → migrate → smoke; local checks; `make destroy` |
 
 After editing the `.drawio` file, re-export the PNGs with the draw.io CLI:
 
@@ -60,7 +61,7 @@ done
 | Step | One stage of a run: Fetch, Extract, Normalize, Chunk, Embed, Validate, Index, Finalize (plus Claim, OCR and MarkFailed) |
 | LATEST | The current status item of an article |
 | Staging | The S3 bucket holding each step's output per article version |
-| Vector table | A pgvector table per embedding model and dimension, for example `chunks_primary` |
+| Vector table | A pgvector table per embedding profile (model and dimension), `chunks_<profile>`, for example `chunks_primary` |
 | `chunks_active` | The view that search reads. It points at the live vector table |
-| Lease | A 15-minute claim on an article by one run, so concurrent runs can't interleave |
+| Lease | A claim on an article by one run (35 minutes, `LEASE_SECONDS`, extended at every step), so concurrent runs can't interleave |
 | Reconciler | An hourly Lambda that repairs what events missed; weekly it also checks for drift |

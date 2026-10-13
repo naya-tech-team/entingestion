@@ -1,4 +1,4 @@
-"""API contract hardening (review M2.3): idempotency keys, preconditions, listing, file types."""
+"""API contract hardening: idempotency keys, preconditions, listing, file types."""
 
 from __future__ import annotations
 

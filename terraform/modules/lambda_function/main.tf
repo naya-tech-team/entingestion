@@ -6,7 +6,7 @@ locals {
 
 # Created before the function, so Lambda never auto-creates an unencrypted, never-expiring group.
 resource "aws_cloudwatch_log_group" "this" {
-  #checkov:skip=CKV_AWS_338:Retention is set per environment (brief §7.3: 30 days dev, 90 days prod).
+  #checkov:skip=CKV_AWS_338:Retention is set per environment (log_retention_days: 30 days dev, 90 days prod).
   name              = "/aws/lambda/${var.name}"
   retention_in_days = var.log_retention_days
   kms_key_id        = var.kms_key_arn

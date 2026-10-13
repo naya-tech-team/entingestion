@@ -1,4 +1,4 @@
-# The vector store: Aurora + RDS Proxy (database_mode = "aurora", the brief's design) or a
+# The vector store: Aurora + RDS Proxy (database_mode = "aurora", the production design) or a
 # single RDS instance (database_mode = "rds", for the AWS free plan). Both use IAM auth only:
 # no stored passwords for the app users.
 

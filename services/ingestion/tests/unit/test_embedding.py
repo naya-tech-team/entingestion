@@ -24,13 +24,12 @@ from ingest.embedding.openai_compat import OpenAICompatibleEmbedder
 from ingest.embedding.profiles import (
     EmbeddingProfile,
     ProfileError,
-    builtin_profiles,
     parse,
 )
 from ingest.errors import ErrorCode, IngestPermanent, IngestThrottled, IngestTransient
 from ingest.models.staging import Chunk
 from ingest.vectorstore.targets import TARGETS, Target
-from tests.conftest import REGION
+from tests.conftest import PROFILE_ENV, REGION
 from tests.unit.test_pipeline import (
     PAGE,
     FakeTitan,
@@ -67,28 +66,29 @@ def fresh() -> Iterator[None]:
 # -- configuration ---------------------------------------------------------------------------
 
 
-def test_without_configuration_the_original_tables_stay() -> None:
-    config = parse({})
-    assert config.default == "primary"
-    assert {p.table for p in config.profiles.values()} == {
-        "chunks_primary",
-        "chunks_compact",
-    }
-    assert config.profiles["compact"].model == "amazon.titan-embed-text-v2:0"
-    assert config.tenants == {}
+def configured() -> dict[str, EmbeddingProfile]:
+    """The test profiles (tests/conftest.py): Titan v2 at 1024 (primary) and 512 (compact)."""
+    return dict(parse(PROFILE_ENV).profiles)
 
 
-def test_the_old_single_model_variables_still_pick_the_default() -> None:
-    assert parse({"TARGET_TABLE": "chunks_compact"}).default == "compact"
-    config = parse(
-        {
-            "TARGET_TABLE": "chunks_titan2_256",
-            "EMBEDDING_MODEL_ID": "amazon.titan-embed-text-v2:0",
-            "EMBEDDING_DIMENSION": "256",
-        }
-    )
-    assert config.default == "titan2_256"
-    assert config.profiles["titan2_256"].dimension == 256
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ({}, "EMBEDDING_PROFILES is not set"),
+        ({"DEFAULT_PROFILE": "primary"}, "EMBEDDING_PROFILES is not set"),
+        ({"EMBEDDING_PROFILES": "not json", "DEFAULT_PROFILE": "x"}, "isn't JSON"),
+        ({**PROFILE_ENV, "DEFAULT_PROFILE": ""}, "DEFAULT_PROFILE is not set"),
+    ],
+)
+def test_profiles_are_configuration(env: dict[str, str], message: str) -> None:
+    with pytest.raises(ProfileError, match=message):
+        parse(env)
+
+
+def test_settings_fail_without_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EMBEDDING_PROFILES")
+    with pytest.raises(ProfileError, match="EMBEDDING_PROFILES is not set"):
+        get_settings()
 
 
 def test_profiles_from_the_environment() -> None:
@@ -116,7 +116,7 @@ def test_profiles_from_the_environment() -> None:
 @pytest.mark.parametrize(
     ("env", "message"),
     [
-        ({"EMBEDDING_PROFILES": "{}"}, "non-empty"),
+        ({"EMBEDDING_PROFILES": "{}", "DEFAULT_PROFILE": "x"}, "non-empty"),
         ({"EMBEDDING_PROFILES": json.dumps({"Bad-Name": COHERE_V3})}, "must match"),
         ({"EMBEDDING_PROFILES": json.dumps({"x": {**COHERE_V3, "dimension": 768}})}, "supports"),
         ({"EMBEDDING_PROFILES": json.dumps({"x": {**COHERE_V3, "model": "meta.x"}})}, "unsupp"),
@@ -126,8 +126,8 @@ def test_profiles_from_the_environment() -> None:
             "https",
         ),
         ({"EMBEDDING_PROFILES": json.dumps({"x": {**LITELLM, "dimension": 4001}})}, "dimension"),
-        ({"DEFAULT_PROFILE": "nope"}, "isn't a profile"),
-        ({"TENANT_PROFILES": json.dumps({"t": "nope"})}, "unknown profiles"),
+        ({**PROFILE_ENV, "DEFAULT_PROFILE": "nope"}, "isn't a profile"),
+        ({**PROFILE_ENV, "TENANT_PROFILES": json.dumps({"t": "nope"})}, "unknown profiles"),
     ],
 )
 def test_bad_profiles_are_refused(env: dict[str, str], message: str) -> None:
@@ -168,12 +168,15 @@ def test_settings_carry_the_profiles(monkeypatch: pytest.MonkeyPatch) -> None:
 # -- cache keys and staged file names --------------------------------------------------------
 
 
-def test_titan_keeps_its_cache_keys_and_others_add_a_fingerprint() -> None:
-    titan = Target(builtin_profiles()["primary"])
-    assert titan.cache_key("hello").endswith("#amazon.titan-embed-text-v2:0@1024@norm")
+def test_cache_keys_carry_the_profile_fingerprint_and_files_the_table() -> None:
+    titan = Target(configured()["primary"])
+    fingerprint = titan.profile.fingerprint
+    assert titan.cache_key("hello").endswith(
+        f"#amazon.titan-embed-text-v2:0@1024@norm#{fingerprint}"
+    )
     assert (titan.vectors_file, titan.manifest_file) == (
-        "embeddings/vectors.parquet",
-        "_manifest.json",
+        "embeddings/chunks_primary.parquet",
+        "_manifest.chunks_primary.json",
     )
     one = Target(EmbeddingProfile("a", "openai_compatible", "m", 512, base_url="https://x.io/v1"))
     other = Target(EmbeddingProfile("a", "openai_compatible", "m", 512, base_url="https://y.io"))
@@ -181,7 +184,7 @@ def test_titan_keeps_its_cache_keys_and_others_add_a_fingerprint() -> None:
     assert one.cache_key("hello").startswith(titan.cache_key("hello").split("#")[0])
     assert one.vectors_file == "embeddings/chunks_a.parquet"
     cohere = Target(EmbeddingProfile("c", "bedrock", "cohere.embed-english-v3", 1024))
-    assert cohere.cache_key("hello").count("#") == 2
+    assert cohere.cache_key("hello").count("#") == titan.cache_key("hello").count("#") == 2
 
 
 # -- Bedrock ---------------------------------------------------------------------------------
@@ -205,7 +208,7 @@ class FakeBedrock:
 
 def test_titan_sends_one_text_per_call() -> None:
     fake = FakeBedrock(lambda r: {"embedding": [0.6, 0.8], "inputTextTokenCount": 3})
-    profile = builtin_profiles()["compact"]
+    profile = configured()["compact"]
     model = bedrock_embedder(fake, profile)  # type: ignore[arg-type]
     assert isinstance(model, BedrockTitanEmbedder)
     assert model.batch_size == 1
@@ -499,8 +502,8 @@ def test_validate_flags_chunks_over_the_models_input_limit() -> None:
 def test_profile_input_limits_are_capped_by_the_model_family() -> None:
     cohere = EmbeddingProfile("c", "bedrock", "cohere.embed-english-v3", 1024)
     assert cohere.input_token_limit == 512
-    assert builtin_profiles()["primary"].input_token_limit == 8192
-    assert builtin_profiles()["primary"].per_input_tokens
+    assert configured()["primary"].input_token_limit == 8192
+    assert configured()["primary"].per_input_tokens
     assert not cohere.per_input_tokens
 
 

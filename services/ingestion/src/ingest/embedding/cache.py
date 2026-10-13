@@ -1,5 +1,6 @@
-"""embedding_cache: sha256(embed_text)#model_id -> vector, so unchanged chunks of a new version
-(and rebuilds) don't call Bedrock again (brief UC2, UC10)."""
+"""embedding_cache: sha256(embed_text)#model@dim@norm#<profile fingerprint> -> vector
+(Target.cache_key), so unchanged chunks of a new version (and rebuilds) don't call the model
+again (docs/USE_CASES.md UC2, UC10)."""
 
 from __future__ import annotations
 

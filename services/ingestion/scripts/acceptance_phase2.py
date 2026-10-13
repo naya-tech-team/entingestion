@@ -1,9 +1,10 @@
-"""Phase 2 gate against a deployed environment (brief §15: UC1, UC3-UC8, UC11, DUP, CONC).
+"""Phase 2 gate against a deployed environment (docs/USE_CASES.md UC1, UC3-UC8, UC11, DUP,
+CONC).
 
     uv run python scripts/acceptance_phase2.py [--env dev] [--only api,uc3] [--skip uc6]
 
 Scenarios run through the real producer (producer-cli and its API), the control API and the
-reconciler Lambda. uc6 waits for a lease to expire (LEASE_SECONDS, 15 minutes), so it runs last.
+reconciler Lambda. uc6 waits for a lease to expire (LEASE_SECONDS, 35 minutes), so it runs last.
 
 UC4 (Bedrock throttled once -> same step item, attempt 2) can't be forced on demand against the
 real service; it is covered by the unit tests (test_status_store: retry updates the same item).
@@ -26,10 +27,11 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+from _tf import ROOT, default_env, function_name, tf_output
 from acceptance import SOURCE, Env, check, conc, dup, plain
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
-from gate_phase1 import ROOT, tf_output
+from entcommon.sigv4 import region_from_url
 from pypdf import PdfReader, PdfWriter
 
 sys.path.insert(0, str(ROOT / "services" / "ingestion"))
@@ -45,9 +47,10 @@ MAPPING_DRAIN_S = 120
 class Signed:
     """SigV4-signed JSON calls to an API Gateway (execute-api) API."""
 
-    def __init__(self, base_url: str, region: str) -> None:
+    def __init__(self, base_url: str) -> None:
         self.base = base_url.rstrip("/")
-        self.region = region
+        # The API's region from its URL, else AWS_REGION / AWS_DEFAULT_REGION; an error if neither.
+        self.region = region_from_url(base_url)
         self.session = boto3.Session()
 
     def call(
@@ -86,9 +89,8 @@ class Signed:
 class Ctx:
     def __init__(self, env_name: str) -> None:
         self.env = Env(env_name)
-        region = boto3.Session().region_name or "us-west-2"
-        self.control = Signed(tf_output("ingestion", env_name, "control_api_url"), region)
-        self.producer_api = Signed(self.env.api_url, region)
+        self.control = Signed(tf_output("ingestion", env_name, "control_api_url"))
+        self.producer_api = Signed(self.env.api_url)
         self.reconciler = tf_output("ingestion", env_name, "reconciler_function_name")
         self.lam = boto3.client("lambda")
         self.failures: list[str] = []
@@ -302,7 +304,7 @@ def _ingest_mapping(ctx: Ctx) -> str:
         QueueUrl=ctx.env.ingest_queue, AttributeNames=["QueueArn"]
     )["Attributes"]["QueueArn"]
     mappings = ctx.lam.list_event_source_mappings(
-        FunctionName=f"ingestion-{ctx.env.env}-dispatcher", EventSourceArn=queue_arn
+        FunctionName=function_name(ctx.env.env, "dispatcher"), EventSourceArn=queue_arn
     )["EventSourceMappings"]
     return str(mappings[0]["UUID"])
 
@@ -318,7 +320,7 @@ def _set_mapping(ctx: Ctx, uuid_: str, enabled: bool) -> None:
 
 
 def uc7(ctx: Ctx) -> None:
-    print("UC7: stream event dropped -> reconciler enqueues from gsi_updated")
+    print("UC7: stream event dropped -> reconciler enqueues from gsi_updated_shard")
     mapping = _ingest_mapping(ctx)
     _set_mapping(ctx, mapping, enabled=False)
     try:
@@ -433,7 +435,7 @@ SCENARIOS: dict[str, Callable[[Ctx], None]] = {
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", default="dev")
+    parser.add_argument("--env", default=default_env())
     parser.add_argument("--only", default="", help="comma-separated scenarios")
     parser.add_argument("--skip", default="", help="comma-separated scenarios")
     args = parser.parse_args()

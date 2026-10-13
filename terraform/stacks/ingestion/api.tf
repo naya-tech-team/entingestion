@@ -1,4 +1,4 @@
-# Control API (brief §10): REST + IAM auth. Three invoke policies: operators (every route),
+# Control API: REST + IAM auth. Three invoke policies: operators (every route),
 # readers (GET only) and searchers (POST /v1/search only). Attach them to the roles or users
 # that need them. Search also checks the caller against the producer's source access policy.
 

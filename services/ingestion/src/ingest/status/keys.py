@@ -1,4 +1,5 @@
-"""Key layout of the single ingestion_status table (brief §6.1-6.2)."""
+"""Key layout of the single ingestion_status table: LATEST, RUN# and step items per article;
+process SUMMARY and membership items; #CONFIG, #SLOTS and the sparse GSI keys."""
 
 from __future__ import annotations
 
@@ -7,7 +8,8 @@ from ingest.models.status import ArticleStatus, StepName
 LATEST = "LATEST"
 SUMMARY = "SUMMARY"
 LEASE_BUCKET = "LEASE"
-# gsi1 partition of SUMMARY items whose process may still need completing (reconciler §11.5).
+# gsi1 partition of SUMMARY items whose process may still need completing (the reconciler
+# checks them).
 SUMMARY_OPEN = "SUMMARY#OPEN"
 
 

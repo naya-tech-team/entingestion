@@ -5,6 +5,7 @@ import { renderToString } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router";
 import { describe, expect, it } from "vitest";
 import { ConfirmAction } from "./components/ConfirmAction";
+import { FileRow } from "./components/FileRow";
 import { ArticlePage } from "./pages/ArticlePage";
 import { DlqPage } from "./pages/ops/DlqPage";
 import { FailedPage } from "./pages/ops/FailedPage";
@@ -86,6 +87,23 @@ describe("pages", () => {
 
   it("Ops tables", () => {
     expect(renderOps("/ops/tables", "tables", <TablesPage />)).toContain("Vector tables");
+  });
+
+  it("FileRow shows a queued file's progress, or its validation error", () => {
+    const base = { id: "f1", title: "", externalId: "", error: null, state: null };
+    const file = new File(["x"], "a.pdf", { type: "application/pdf" });
+    const row = (entry: Parameters<typeof FileRow>[0]["entry"], locked = false) =>
+      renderToString(
+        <MemoryRouter>
+          <FileRow entry={entry} locked={locked} onChange={() => undefined} onRemove={() => undefined} />
+        </MemoryRouter>,
+      );
+    expect(row({ ...base, file })).toContain("Ready");
+    expect(row({ ...base, file })).toContain("Remove");
+    const done = row({ ...base, file, state: { phase: "done", articleId: "a-1", uploadId: "u-1" } }, true);
+    expect(done).toContain('href="/articles/a-1"');
+    expect(done).not.toContain("Remove");
+    expect(row({ ...base, file, error: "The file is empty" })).toContain("The file is empty");
   });
 
   it("ConfirmAction starts closed, with no dialog", () => {

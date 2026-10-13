@@ -1,6 +1,6 @@
-"""Migration 004 against a real pgvector database: ingest_ops reads the vector tables and
+"""The ops roles against a real pgvector database: ingest_ops reads the vector tables and
 switches chunks_active (as the view's owner, ingest_views) but can't write or truncate, and a
-master user without superuser rights (as on RDS/Aurora) can apply it."""
+master user without superuser rights (as on RDS/Aurora) can prepare the database."""
 
 from __future__ import annotations
 
@@ -11,8 +11,9 @@ from typing import Any
 import psycopg
 import pytest
 
-from ingest.migrate import activate, status
-from ingest.vectorstore.migrations import apply
+from ingest.embedding.profiles import parse
+from ingest.migrate import activate, prepare, status
+from tests.conftest import PROFILE_ENV
 
 pytestmark = pytest.mark.integration
 
@@ -70,9 +71,9 @@ def test_ingest_ops_cannot_change_data(pg: Any, statement: str) -> None:
     pg.rollback()
 
 
-def test_a_non_superuser_master_applies_every_migration(pg_url: str) -> None:
+def test_a_non_superuser_master_prepares_the_database(pg_url: str) -> None:
     """RDS/Aurora's master user has CREATEROLE but isn't a superuser: it must be able to create
-    ingest_views and ingest_ops, hand the view to ingest_views, and still switch it."""
+    the roles and the profile tables, hand the view to ingest_views, and still switch it."""
     name = f"t_{uuid.uuid4().hex[:12]}"
     master = f"m_{uuid.uuid4().hex[:8]}"
     db_url = pg_url.rsplit("/", 1)[0] + f"/{name}"
@@ -89,7 +90,10 @@ def test_a_non_superuser_master_applies_every_migration(pg_url: str) -> None:
             conn.commit()
             conn.execute(f"SET SESSION AUTHORIZATION {master}")
             conn.commit()
-            assert "004" in apply(conn, MIGRATIONS)
+            profiles = parse(PROFILE_ENV).profiles.values()
+            out = prepare(conn, MIGRATIONS, profiles, "chunks_primary")
+            assert out["applied"] == ["001"]
+            assert out["profile_tables_created"] == ["chunks_compact", "chunks_primary"]
             conn.autocommit = False
             assert view_owner(conn) == "ingest_views"
             assert activate(conn, "chunks_compact")["active_table"] == "chunks_compact"

@@ -1,4 +1,4 @@
-"""Step 1: Claim (brief §4.4). Decides what this run does; recorded on RUN#, no step item."""
+"""Step 1: Claim. Decides what this run does; recorded on RUN#, no step item."""
 
 from __future__ import annotations
 
@@ -8,12 +8,14 @@ from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from ingest import aws
+from ingest.config import require
 from ingest.models.messages import IngestMessage
 from ingest.steps.rollup import complete_process
 
 logger = Logger()
 tracer = Tracer()
 
+REQUIRED = ("status_table", "producer_process_table")
 # Claim decisions that end the run (the state machine goes to Done or Stale).
 _ENDS_HERE = frozenset({"SKIP", "STALE", "DONE"})
 
@@ -21,6 +23,7 @@ _ENDS_HERE = frozenset({"SKIP", "STALE", "DONE"})
 @logger.inject_lambda_context(clear_state=True)
 @tracer.capture_lambda_handler
 def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+    require(*REQUIRED)
     ctx = event["ctx"]
     message = IngestMessage.model_validate(ctx["message"])
     run_id = str(ctx["run_id"])

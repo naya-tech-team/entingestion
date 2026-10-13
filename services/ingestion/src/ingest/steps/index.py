@@ -1,4 +1,4 @@
-"""Step 8: Index (brief §7.2). Only a passing manifest for this exact version reaches pgvector.
+"""Step 8: Index. Only a passing manifest for this exact version reaches pgvector.
 
 Three modes:
     UPSERT    write this version into every write table and swap it live
@@ -17,22 +17,20 @@ from __future__ import annotations
 from typing import Any, Literal, overload
 
 from aws_lambda_powertools.metrics import MetricUnit
+from entcommon.timeutil import iso_now
 
 from ingest import lifecycle, producer
 from ingest.embedding.vectors import from_parquet
 from ingest.errors import IngestStale, make_error, validation_code
-from ingest.ids import STAGING_FILES
 from ingest.models.staging import Chunk, Manifest
 from ingest.models.status import ArticleStatus, RunOutcome, StepName
 from ingest.steps.embed import read_chunks
 from ingest.steps.protocol import StepContext, StepOutput, logger, metrics, step
 from ingest.steps.rollup import complete_process
-from ingest.timeutil import iso_date, iso_now
+from ingest.timeutil import iso_date
 from ingest.vectorstore import index as vector_index
 from ingest.vectorstore.index import DEFAULT_TENANT, ArticleAttributes
 from ingest.vectorstore.targets import TARGETS, Target
-
-MANIFEST = STAGING_FILES["VALIDATE"]
 
 
 def article_attributes(article_id: str, chunks: list[Chunk] | None = None) -> ArticleAttributes:
@@ -122,7 +120,15 @@ def _retag_others(ctx: StepContext, attributes: ArticleAttributes) -> None:
             )
 
 
-@step(StepName.INDEX, input_name=MANIFEST)
+def _manifest(ctx: StepContext) -> str:
+    return ctx.target.manifest_file
+
+
+@step(
+    StepName.INDEX,
+    input_name=_manifest,
+    requires=("db.host", "cache_table", "producer_articles_table", "producer_process_table"),
+)
 def handler(ctx: StepContext) -> StepOutput:
     if ctx.mode == "DELETE":
         return _delete(ctx)

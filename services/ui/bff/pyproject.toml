@@ -8,6 +8,7 @@ dependencies = [
     "aws-lambda-powertools>=3.0,<4",
     "botocore>=1.35",  # SigV4 signing with the function role's credentials
     "urllib3>=2.2,<3",  # HTTP client (botocore depends on it too)
+    "entingestion-common",  # services/common (path source below)
 ]
 
 [dependency-groups]
@@ -24,6 +25,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bff"]
+
+[tool.uv.sources]
+# Shared code (services/common); the Lambda builds install it next to the hash-locked deps.
+entingestion-common = { path = "../../common", editable = true }
 
 [tool.ruff]
 line-length = 100

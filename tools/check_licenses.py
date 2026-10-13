@@ -40,7 +40,7 @@ ALLOWED = (
 DENIED = ("AGPL", "AFFERO", "SSPL", "BUSL", "BUSINESS SOURCE", "COMMONS CLAUSE", "COMMERCIAL", "PROPRIETARY")
 
 # Our own projects (not distributed as dependencies).
-OWN = {"ingest", "producer", "ui-bff"}
+OWN = {"entingestion-common", "ingest", "producer", "ui-bff"}
 
 # Packages whose metadata doesn't state a license, reviewed by hand: name -> license.
 REVIEWED: dict[str, str] = {}

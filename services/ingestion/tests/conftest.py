@@ -1,7 +1,10 @@
-"""moto-backed AWS for unit tests. Tables mirror terraform/stacks/ingestion."""
+"""moto-backed AWS for unit tests (tables mirror terraform/stacks/ingestion), and the embedding
+profiles every test runs with."""
 
 from __future__ import annotations
 
+import json
+import os
 import re
 from collections.abc import Iterator
 from typing import Any
@@ -11,9 +14,45 @@ import pytest
 from botocore.client import BaseClient
 from moto import mock_aws
 
-REGION = "us-west-2"
+
+def _test_region() -> str:
+    """The region the tests run in, from the environment: AWS_REGION, else AWS_DEFAULT_REGION,
+    else the AWS config's region. moto works in any region; nothing here names one."""
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    region = region or boto3.session.Session().region_name
+    if not region:
+        raise RuntimeError("set AWS_REGION (or AWS_DEFAULT_REGION) to run the tests")
+    return region
+
+
+REGION = _test_region()
+
+
+def bucket_location() -> dict[str, Any]:
+    """create_bucket's location argument: S3 refuses a LocationConstraint of us-east-1
+    (its default region)."""
+    return (
+        {}
+        if REGION == "us-east-1"
+        else {"CreateBucketConfiguration": {"LocationConstraint": REGION}}
+    )
+
+
 STAGING_BUCKET = "ingest-staging-test"
 RAW_BUCKET = "producer-raw-test"
+
+# The embedding profiles of every test (EMBEDDING_PROFILES has no default): Titan v2 at 1024 and
+# 512 dimensions, primary being the default registry's table.
+TITAN = "amazon.titan-embed-text-v2:0"
+PROFILES = {
+    "primary": {"provider": "bedrock", "model": TITAN, "dimension": 1024},
+    "compact": {"provider": "bedrock", "model": TITAN, "dimension": 512},
+}
+PROFILE_ENV = {
+    "EMBEDDING_PROFILES": json.dumps(PROFILES),
+    "DEFAULT_PROFILE": "primary",
+    "TENANT_PROFILES": "{}",
+}
 
 ENV = {
     "AWS_DEFAULT_REGION": REGION,
@@ -32,6 +71,8 @@ ENV = {
     "POWERTOOLS_METRICS_NAMESPACE": "Ingestion",
     "POWERTOOLS_TRACE_DISABLED": "1",
     "TABLES_FUNCTION_NAME": "ingestion-test-tables",
+    "QUERY_FUNCTION_NAME": "ingestion-test-query",
+    "DB_HOST": "db.test.invalid",
 }
 
 STATUS_GSIS = [
@@ -84,16 +125,15 @@ def create_tables() -> None:
         BillingMode="PAY_PER_REQUEST",
         AttributeDefinitions=[
             {"AttributeName": "article_id", "AttributeType": "S"},
-            {"AttributeName": "updated_date", "AttributeType": "S"},
             {"AttributeName": "updated_at", "AttributeType": "S"},
             {"AttributeName": "updated_shard", "AttributeType": "S"},
         ],
         KeySchema=[{"AttributeName": "article_id", "KeyType": "HASH"}],
         GlobalSecondaryIndexes=[
             {
-                "IndexName": index,
+                "IndexName": "gsi_updated_shard",
                 "KeySchema": [
-                    {"AttributeName": key, "KeyType": "HASH"},
+                    {"AttributeName": "updated_shard", "KeyType": "HASH"},
                     {"AttributeName": "updated_at", "KeyType": "RANGE"},
                 ],
                 "Projection": {
@@ -101,10 +141,6 @@ def create_tables() -> None:
                     "NonKeyAttributes": ["content_sha256", "process_id", "upload_id"],
                 },
             }
-            for index, key in (
-                ("gsi_updated", "updated_date"),
-                ("gsi_updated_shard", "updated_shard"),
-            )
         ],
     )
     ddb.create_table(
@@ -152,6 +188,18 @@ def check_expression_names(operation: str, params: dict[str, Any]) -> None:
                 raise AssertionError(f"{operation}: {kind} unused in expressions: {unused}")
 
 
+@pytest.fixture(autouse=True)
+def embedding_profiles(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Every test starts from the two Titan profiles (a test may set others)."""
+    from ingest.config import get_settings
+
+    for key, value in PROFILE_ENV.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def aws(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     for key, value in ENV.items():
@@ -176,9 +224,7 @@ def aws(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         ingest_aws.reset()
         s3 = boto3.client("s3", region_name=REGION)
         for bucket in (STAGING_BUCKET, RAW_BUCKET):
-            s3.create_bucket(
-                Bucket=bucket, CreateBucketConfiguration={"LocationConstraint": REGION}
-            )
+            s3.create_bucket(Bucket=bucket, **bucket_location())
             s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
         yield
         ingest_aws.reset()

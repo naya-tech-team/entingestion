@@ -1,9 +1,8 @@
-"""API Gateway (REST, {proxy+}) Lambda handler (brief §4)."""
+"""API Gateway (REST, {proxy+}) Lambda handler."""
 
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Callable
 from functools import lru_cache
@@ -43,10 +42,13 @@ logger = Logger()
 tracer = Tracer()
 app = APIGatewayRestResolver()
 
+# Beyond the tables and bucket every function needs (config.Settings).
+REQUIRED = ("IDEMPOTENCY_TABLE",)
+
 
 @lru_cache(maxsize=1)
 def get_service() -> ProducerService:
-    settings = get_settings()
+    settings = get_settings().require(*REQUIRED)
     repo = Repository.from_names(
         settings.process_table, settings.articles_table, settings.uploads_table
     )
@@ -65,7 +67,7 @@ _IDEMPOTENCY = IdempotencyConfig(
 
 @lru_cache(maxsize=1)
 def _idempotency_store() -> DynamoDBPersistenceLayer:
-    return DynamoDBPersistenceLayer(table_name=os.environ["IDEMPOTENCY_TABLE"])
+    return DynamoDBPersistenceLayer(table_name=get_settings().need("IDEMPOTENCY_TABLE"))
 
 
 def _once(route: str, produce: Callable[[], tuple[int, BaseModel]]) -> Response[str]:
@@ -329,5 +331,6 @@ def delete_article(article_id: str) -> Response[str]:
 @logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_REST)
 @tracer.capture_lambda_handler
 def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+    get_service()  # cached: a missing setting fails the first invocation, not a later request
     _IDEMPOTENCY.register_lambda_context(context)
     return app.resolve(event, context)

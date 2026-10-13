@@ -12,7 +12,7 @@ post {
 
 body:json {
   {
-    "table": "chunks_primary",
+    "table": "{{liveTable}}",
     "force": true
   }
 }
@@ -32,5 +32,5 @@ tests {
 }
 
 docs {
-  Switches `chunks_active` back to the original table (it was written all along, so nothing is missing).
+  Switches `chunks_active` back to `liveTable`, the original table (it was written all along, so nothing is missing).
 }

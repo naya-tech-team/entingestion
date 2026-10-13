@@ -3,27 +3,27 @@ data "aws_partition" "current" {}
 data "aws_region" "current" {}
 
 locals {
-  is_prod     = var.env == "prod"
-  name_prefix = "producer-${var.env}"
+  is_prod     = module.common.is_prod
+  name_prefix = module.common.name_prefix
   account_id  = data.aws_caller_identity.current.account_id
   region      = data.aws_region.current.region
   partition   = data.aws_partition.current.partition
 
   raw_bucket_name = coalesce(var.raw_bucket_name, "${local.name_prefix}-raw-${local.account_id}-${local.region}")
 
-  # Lambda package. The local zip is hashed only in zip mode, so S3 mode never reads the disk.
-  use_s3_artifact = var.lambda_s3_key != null
-  zip_hash        = one([for p in compact([local.use_s3_artifact ? "" : var.lambda_zip_path]) : filebase64sha256(p)])
-  lambda_code = {
-    zip_path         = local.use_s3_artifact ? null : var.lambda_zip_path
-    s3_bucket        = var.lambda_s3_bucket
-    s3_key           = var.lambda_s3_key
-    source_code_hash = local.use_s3_artifact ? var.lambda_s3_source_code_hash : local.zip_hash
-  }
-
   # Every role the stack creates carries the workload boundary (terraform/bootstrap/access.tf);
   # the deploy role may only create roles that do.
-  permissions_boundary = var.workload_boundary_enabled ? coalesce(var.permissions_boundary_arn, "arn:${local.partition}:iam::${local.account_id}:policy/entingestion-${var.env}-workload-boundary") : null
+  permissions_boundary = module.common.permissions_boundary
+}
+
+# Lambda package: the local zip (default) or an artifact in S3 (CI).
+module "lambda_artifact" {
+  source = "../../modules/lambda_artifact"
+
+  zip_path            = var.lambda_zip_path
+  s3_bucket           = var.lambda_s3_bucket
+  s3_key              = var.lambda_s3_key
+  s3_source_code_hash = var.lambda_s3_source_code_hash
 }
 
 # ---------------------------------------------------------------------------
@@ -36,30 +36,8 @@ module "kms" {
   alias       = local.name_prefix
   description = "Producer service data key (${var.env}): tables, raw bucket, log groups and alarm topic."
 
-  policy_statements = [
-    {
-      # CloudWatch Logs encrypts the service's log groups with this key.
-      sid        = "CloudWatchLogsEncryption"
-      actions    = ["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
-      principals = [{ type = "Service", identifiers = ["logs.${local.region}.amazonaws.com"] }]
-      conditions = [{
-        test     = "ArnLike"
-        variable = "kms:EncryptionContext:aws:logs:arn"
-        values   = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:*"]
-      }]
-    },
-    {
-      # CloudWatch alarms publish to the CMK-encrypted alarm topic.
-      sid        = "CloudWatchAlarmsToEncryptedTopic"
-      actions    = ["kms:Decrypt", "kms:GenerateDataKey*"]
-      principals = [{ type = "Service", identifiers = ["cloudwatch.amazonaws.com"] }]
-      conditions = [{
-        test     = "StringEquals"
-        variable = "aws:SourceAccount"
-        values   = [local.account_id]
-      }]
-    },
-  ]
+  allow_cloudwatch_logs         = true # the service's log groups
+  allow_cloudwatch_alarms_topic = true # the alarm topic
 }
 
 # ---------------------------------------------------------------------------
@@ -158,7 +136,7 @@ data "aws_iam_policy_document" "raw_uploads_only_by_ticket" {
 }
 
 # ---------------------------------------------------------------------------
-# Tables (brief §5). Names and keys are a contract with the ingestion pipeline.
+# Tables. Names and keys are a contract with the ingestion pipeline.
 # ---------------------------------------------------------------------------
 
 module "process_table" {
@@ -200,29 +178,13 @@ module "articles_table" {
   hash_key = "article_id"
   attributes = [
     { name = "article_id", type = "S" },
-    { name = "process_id", type = "S" },
     { name = "updated_at", type = "S" },
-    { name = "updated_date", type = "S" },
     { name = "updated_shard", type = "S" },
   ]
   global_secondary_indexes = [
     {
-      name      = "gsi_process"
-      hash_key  = "process_id"
-      range_key = "updated_at"
-    },
-    {
-      # Used by the ingestion reconciler: today's and yesterday's changes with their checksums.
-      # Rows written before gsi_updated_shard; to be dropped once no such row is that recent.
-      name               = "gsi_updated"
-      hash_key           = "updated_date"
-      range_key          = "updated_at"
-      projection_type    = "INCLUDE"
-      non_key_attributes = ["content_sha256", "process_id", "upload_id"]
-    },
-    {
-      # The same, a day spread over 16 partitions (<date>#00..15): one day's writes on a single
-      # partition throttled bulk loads.
+      # Used by the ingestion reconciler: today's and yesterday's changes with their checksums,
+      # a day spread over 16 partitions (<date>#00..15) so bulk loads don't throttle one.
       name               = "gsi_updated_shard"
       hash_key           = "updated_shard"
       range_key          = "updated_at"
@@ -263,7 +225,7 @@ module "uploads_table" {
       hash_key           = "pending"
       range_key          = "ticket_expires_epoch"
       projection_type    = "INCLUDE"
-      non_key_attributes = ["status", "s3_key", "process_id", "counted"]
+      non_key_attributes = ["status", "s3_key", "process_id"]
     },
     {
       # GET /v1/processes/{id}/uploads: a process's uploads, oldest first. Membership markers

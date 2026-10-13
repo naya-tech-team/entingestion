@@ -1,5 +1,6 @@
-"""Reindex and rebuild (brief §7.3, UC9, UC10): a Distributed Map state machine re-runs indexed
-articles from a staged step into a vector table, through the low-priority backfill queue.
+"""Reindex and rebuild (docs/USE_CASES.md UC9, UC10): a Distributed Map state machine re-runs
+indexed articles from a staged step into a vector table, through the low-priority backfill
+queue.
 
     from_stage EMBED + a new table   -> model change: re-embed staged chunks into the new table
     from_stage INDEX + the live table -> rebuild: reload staged vectors, zero Bedrock calls
@@ -21,7 +22,7 @@ from aws_lambda_powertools.utilities.typing import LambdaContext
 from pydantic import BaseModel, ConfigDict, Field
 
 from ingest import aws, requeue
-from ingest.config import get_settings
+from ingest.config import get_settings, require
 from ingest.models.status import ArticleStatus, StepName
 from ingest.status.store import StatusStore
 from ingest.tenancy import Tenancy
@@ -93,6 +94,7 @@ def plan_items(
 @logger.inject_lambda_context(clear_state=True)
 @tracer.capture_lambda_handler
 def plan(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+    require("status_table", "staging_bucket")
     request = ReindexRequest.model_validate(event["request"])
     ids = plan_items(aws.status_store(), request.filter, request.target_table, request.tenant_id)
     bucket = get_settings().staging_bucket
@@ -109,6 +111,7 @@ def plan(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
 @logger.inject_lambda_context(clear_state=True)
 @tracer.capture_lambda_handler
 def enqueue(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+    require("status_table", "queues.backfill_url")
     batch = event["BatchInput"]
     store = aws.status_store()
     messages, missing = [], []
@@ -125,5 +128,5 @@ def enqueue(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
             missing.append(str(item["article_id"]))
         else:
             messages.append(message)
-    queued = requeue.enqueue(messages, get_settings().backfill_queue_url)
+    queued = requeue.enqueue(messages, get_settings().queues.backfill_url)
     return {"queued": queued, "missing": missing}

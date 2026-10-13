@@ -10,10 +10,10 @@ import pytest
 
 from producer_client import cli
 from producer_client.client import ProducerClient, guess_content_type
-from producer_client.sigv4 import Signer, region_from_url
+from producer_client.sigv4 import Signer
 from tests.conftest import BUCKET, REGION, FakeContext, rest_event
 
-API_URL = "https://abc123.execute-api.us-west-2.amazonaws.com/prod"
+API_URL = f"https://abc123.execute-api.{REGION}.amazonaws.com/prod"
 
 
 @pytest.fixture
@@ -36,21 +36,31 @@ def routed_client(aws: None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ProducerClient, "_send", send)
 
 
-def test_region_from_execute_api_url() -> None:
-    assert region_from_url(API_URL) == "us-west-2"
-    assert region_from_url("https://api.example.com") is None
+def test_region_comes_from_the_url_then_the_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    for name in ("AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "none"))
+    session = boto3.Session(region_name="eu-west-1")
+    assert ProducerClient(API_URL, session=session).signer.region == REGION
+    assert ProducerClient("https://api.example.com", session=session).signer.region == "eu-west-1"
+    explicit = ProducerClient(API_URL, region="ap-south-1", session=session)
+    assert explicit.signer.region == "ap-south-1"
+    with pytest.raises(ValueError, match="region"):
+        ProducerClient("https://api.example.com", session=boto3.Session(region_name=None))
 
 
 def test_signer_uses_execute_api_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
     monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
-    signer = Signer(boto3.Session(region_name="us-west-2"), "us-west-2")
+    signer = Signer(boto3.Session(region_name=REGION), REGION)
 
     headers = signer.sign("GET", f"{API_URL}/v1/processes/prc_1", None, {})
 
     assert headers["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
-    assert "/us-west-2/execute-api/aws4_request" in headers["Authorization"]
+    assert f"/{REGION}/execute-api/aws4_request" in headers["Authorization"]
     assert "X-Amz-Date" in headers
 
 

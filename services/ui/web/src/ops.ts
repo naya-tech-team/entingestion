@@ -198,7 +198,7 @@ export function summarizeAction(resp: ActionResponse | null | undefined): Action
     count: typeof r.count === "number" ? r.count : articleIds.length,
     queued: typeof r.queued === "number" ? r.queued : null,
     articleIds,
-    notFound: [...new Set([...strings(r.not_found), ...strings(r.missing)])],
+    notFound: strings(r.not_found),
     errorCode: typeof r.error_code === "string" ? r.error_code : null,
     dlq,
   };

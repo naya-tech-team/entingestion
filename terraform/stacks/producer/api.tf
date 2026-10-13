@@ -1,19 +1,18 @@
-# API: API Gateway (REST, AWS_IAM) -> api Lambda (brief §4, §7.3).
+# API: API Gateway (REST, AWS_IAM) -> api Lambda.
 
 locals {
   # Principals in tfvars are relative to this account ("role/<name>", "user/<name>", patterns
-  # allowed); the full ARN is derived from the account id. A full ARN passes through unchanged.
-  # operator_principals (from the environment) write every source.
-  iam_arn_prefix = "arn:${local.partition}:iam::${var.aws_account_id}:"
+  # allowed); module.common derives the full ARN from the account id and keeps full ARNs as they
+  # are. operator_principals (from the environment) write every source (providers.tf).
   source_access = {
     for name, cfg in var.source_access : name => merge(cfg, {
-      writers = [for p in distinct(concat(cfg.writers, var.operator_principals)) : startswith(p, "arn:") ? p : "${local.iam_arn_prefix}${p}"]
-      readers = [for p in cfg.readers : startswith(p, "arn:") ? p : "${local.iam_arn_prefix}${p}"]
+      writers = module.common.expanded_principals["writers/${name}"]
+      readers = module.common.expanded_principals["readers/${name}"]
     })
   }
-  admin_principals = [for p in var.admin_principals : startswith(p, "arn:") ? p : "${local.iam_arn_prefix}${p}"]
+  admin_principals = module.common.expanded_principals["admins"]
 
-  # Per-source writers/readers and tenants (producer.authz); also published for ingestion.
+  # Per-source writers/readers and tenants (entcommon.authz in services/common); also published for ingestion.
   source_access_json = jsonencode({ sources = local.source_access, admins = local.admin_principals })
 
   # Shared by the api and registrar functions.
@@ -113,7 +112,7 @@ module "api_function" {
   handler              = "producer.api.lambda_handler"
   memory_size          = 512
   timeout              = 29
-  code                 = local.lambda_code
+  code                 = module.lambda_artifact.code
   environment          = local.function_environment
   policy_json          = data.aws_iam_policy_document.api.json
   kms_key_arn          = module.kms.key_arn
@@ -156,11 +155,11 @@ locals {
 }
 
 # Plan-time warning if a role misses the boundary (the deploy role's CreateRole would fail).
-check "roles_carry_the_workload_boundary" {
-  assert {
-    condition     = alltrue([for b in local.role_permissions_boundaries : coalesce(b, "none") == coalesce(local.permissions_boundary, "none")])
-    error_message = "A role in this stack doesn't carry the workload boundary (local.permissions_boundary)."
-  }
+module "boundary_check" {
+  source = "../../modules/boundary_check"
+
+  boundaries = local.role_permissions_boundaries
+  expected   = local.permissions_boundary
 }
 
 # Read-only callers (search services, dashboards): GET routes only. The module's invoke policy

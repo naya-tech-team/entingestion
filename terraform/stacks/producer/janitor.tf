@@ -47,7 +47,7 @@ module "janitor_function" {
   handler     = "producer.janitor.handler"
   memory_size = 256
   timeout     = 300
-  code        = local.lambda_code
+  code        = module.lambda_artifact.code
   environment = merge(local.function_environment, {
     REGISTRAR_QUEUE_URL     = module.registrar_queue.queue_url
     OPEN_PROCESS_IDLE_DAYS  = tostring(var.open_process_idle_days)

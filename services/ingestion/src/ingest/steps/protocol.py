@@ -1,4 +1,4 @@
-"""The step write protocol every step uses (brief §6.3).
+"""The step write protocol every step uses.
 
     @step(StepName.CHUNK, input_name="normalized/document.json")
     def handler_impl(ctx: StepContext) -> StepOutput: ...
@@ -23,7 +23,7 @@ from aws_lambda_powertools.metrics import MetricUnit
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from ingest import aws
-from ingest.config import Settings, get_settings
+from ingest.config import Settings, get_settings, require
 from ingest.errors import DeletePending, IngestStale, classify
 from ingest.models.messages import IngestMessage
 from ingest.models.status import StepName
@@ -127,17 +127,25 @@ Handler = Callable[[dict[str, Any], LambdaContext], dict[str, Any]]
 
 
 ReentryFn = Callable[[StepContext], "StepOutput | None"]
+# What every step needs: its run's status and the staged files.
+STEP_REQUIRED = ("status_table", "staging_bucket")
+# The staged file a step reads: fixed, or per run (a vector table's own vectors or manifest).
+InputName = str | Callable[[StepContext], str]
 
 
 def step(
     name: StepName,
-    input_name: str | None = None,
+    input_name: InputName | None = None,
     *,
     continues: bool = False,
     reenter: ReentryFn | None = None,
+    requires: tuple[str, ...] = (),
 ) -> Callable[[StepFn], Handler]:
     """continues: this handler finishes a step another state started (OcrCollect finishing
     Extract), so starting it again isn't a new attempt.
+
+    requires: settings the step needs besides STEP_REQUIRED (config.Settings.require names);
+    a missing one fails the invocation before any work.
 
     reenter: called when start_step finds the run no longer holds the article. It may return
     an output (the step's work already happened, e.g. a Finalize retried after it finished the
@@ -148,6 +156,7 @@ def step(
         @tracer.capture_lambda_handler
         @metrics.log_metrics
         def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+            require(*STEP_REQUIRED, *requires)
             ctx = replace(StepContext.from_event(event), current_step=name)
             logger.append_keys(
                 lane=ctx.lane,
@@ -157,7 +166,8 @@ def step(
                 step=name.value,
                 doc_version=ctx.doc_version,
             )
-            input_uri = ctx.staging.uri(ctx.staging_prefix, input_name) if input_name else None
+            source = input_name(ctx) if callable(input_name) else input_name
+            input_uri = ctx.staging.uri(ctx.staging_prefix, source) if source else None
             # A stale run ends in the state machine's Stale state, which runs no code: give its
             # admission slot back here.
             try:

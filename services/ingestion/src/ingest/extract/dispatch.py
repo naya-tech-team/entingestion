@@ -1,4 +1,4 @@
-"""Extract canonical blocks from raw files (brief §4.4 step 3): picks the extractor by file type."""
+"""Extract canonical blocks from raw files: picks the extractor by file type."""
 
 from __future__ import annotations
 

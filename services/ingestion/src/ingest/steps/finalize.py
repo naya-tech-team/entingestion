@@ -3,20 +3,15 @@ versions' staged files are retired (ingest.lifecycle)."""
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from aws_lambda_powertools.metrics import MetricUnit
+from entcommon.timeutil import iso_now, parse_iso
 
 from ingest import events, lifecycle, telemetry
-from ingest.ids import STAGING_FILES
 from ingest.models.staging import Manifest
 from ingest.models.status import ArticleStatus, RunOutcome, StepName
 from ingest.status import keys
 from ingest.steps.protocol import StepContext, StepOutput, logger, metrics, step
 from ingest.steps.rollup import complete_process
-from ingest.timeutil import iso_now
-
-MANIFEST = STAGING_FILES["VALIDATE"]
 
 
 def _announce(ctx: StepContext, manifest: Manifest, indexed_at: str) -> None:
@@ -54,7 +49,16 @@ def _already_finished(ctx: StepContext) -> StepOutput | None:
     return StepOutput(metrics={"reannounced": True, "process_completed": bool(completed)})
 
 
-@step(StepName.FINALIZE, input_name=MANIFEST, reenter=_already_finished)
+def _manifest(ctx: StepContext) -> str:
+    return ctx.target.manifest_file
+
+
+@step(
+    StepName.FINALIZE,
+    input_name=_manifest,
+    reenter=_already_finished,
+    requires=("producer_process_table",),
+)
 def handler(ctx: StepContext) -> StepOutput:
     manifest = _read_manifest(ctx)
     if ctx.lane is not None:
@@ -75,9 +79,9 @@ def handler(ctx: StepContext) -> StepOutput:
     )
     _announce(ctx, manifest, indexed_at)
     metrics.add_metric(name="Run_INDEXED", unit=MetricUnit.Count, value=1)  # failure ratio
-    # Producer update -> searchable (brief §12 freshness SLO), by trigger. The SLO and its
-    # alarm use Trigger=STREAM: a replay or reconciler run of an old article reports its age,
-    # which is worth seeing (a slow retry path) but isn't pipeline lag.
+    # Producer update -> searchable (the freshness SLO, docs/RUNBOOK.md "SLOs"), by trigger.
+    # The SLO and its alarm use Trigger=STREAM: a replay or reconciler run of an old article
+    # reports its age, which is worth seeing (a slow retry path) but isn't pipeline lag.
     lag = _freshness_lag(ctx.message.source_updated_at, indexed_at)
     if lag is not None:
         telemetry.emit("FreshnessLagSeconds", lag, MetricUnit.Seconds, Trigger=ctx.message.trigger)
@@ -110,8 +114,7 @@ def _freshness_lag(source_updated_at: str | None, indexed_at: str) -> float | No
     if not source_updated_at:
         return None
     try:
-        start = datetime.fromisoformat(source_updated_at.replace("Z", "+00:00"))
+        start = parse_iso(source_updated_at)
     except ValueError:
         return None
-    end = datetime.fromisoformat(indexed_at.replace("Z", "+00:00"))
-    return max(0.0, (end - start).total_seconds())
+    return max(0.0, (parse_iso(indexed_at) - start).total_seconds())

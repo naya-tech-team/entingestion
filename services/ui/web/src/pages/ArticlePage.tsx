@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Link, useParams } from "react-router";
-import { api, ApiError, AuthError, seg } from "../api";
+import { api, seg } from "../api";
 import { ConfirmAction } from "../components/ConfirmAction";
-import { ErrorBanner, Loading, Stat, StatusBadge, useInterval } from "../components/common";
+import { ErrorBanner, Loading, Stat, StatusBadge } from "../components/common";
 import { formatDuration, formatTime, metricsSummary } from "../format";
+import { useApi } from "../hooks/useApi";
 import { RERUN_WATCH_MS } from "../ops";
 import { articleActive, orderSteps, POLL_MS } from "../status";
 import type { ActionResponse, ArticleRun, ArticleStatus } from "../types";
@@ -20,57 +21,25 @@ function text(value: unknown): string {
 
 export function ArticlePage() {
   const { id = "" } = useParams();
-  const [data, setData] = useState<ArticleStatus | null>(null);
-  const [missing, setMissing] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [loading, setLoading] = useState(false);
-  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [force, setForce] = useState(false);
   const [watchUntil, setWatchUntil] = useState(0);
-  const inFlight = useRef<AbortController | null>(null);
-
-  const load = useCallback(async () => {
-    if (inFlight.current) return;
-    const ctrl = new AbortController();
-    inFlight.current = ctrl;
-    setLoading(true);
-    try {
-      const res = await api.get<ArticleStatus>(`/api/articles/${seg(id)}/status`, ctrl.signal);
-      setData(res);
-      setMissing(false);
-      setError(null);
-    } catch (err) {
-      if (ctrl.signal.aborted) return;
-      if (err instanceof ApiError && err.status === 404) {
-        setMissing(true);
-        setData(null);
-        setError(null);
-      } else {
-        setError(err);
-      }
-    }
-    setUpdatedAt(new Date());
-    setLoading(false);
-    inFlight.current = null;
-  }, [id]);
-
-  useEffect(() => {
-    setData(null);
-    setMissing(false);
-    setError(null);
-    void load();
-    return () => {
-      inFlight.current?.abort();
-      inFlight.current = null;
-    };
-  }, [load]);
-
-  // Keep refreshing while the article may still change, and while it hasn't arrived yet.
-  const active = missing || (data !== null && articleActive(data.latest.status));
-  // After a re-run, keep polling a while: the queued run takes a moment to claim the article.
-  const watching = watchUntil > Date.now();
-  const stopped = error instanceof AuthError || (!active && !watching && data !== null);
-  useInterval(() => void load(), stopped ? null : POLL_MS);
+  // Keep refreshing while the article may still change, and while it hasn't arrived yet (a 404
+  // means "not ingested yet"). After a re-run, keep polling a while: the queued run takes a
+  // moment to claim the article.
+  const {
+    data,
+    notFound: missing,
+    error,
+    loading,
+    updatedAt,
+    polling,
+    reload,
+  } = useApi<ArticleStatus>(`/api/articles/${seg(id)}/status`, {
+    refreshMs: POLL_MS,
+    notFoundOk: true,
+    stopWhen: (d) => !articleActive(d.latest.status) && watchUntil <= Date.now(),
+  });
+  const stopped = !polling;
 
   const latest = data?.latest;
   const currentRun = data?.runs.find((r) => r.run_id === latest?.run_id);
@@ -93,7 +62,7 @@ export function ArticlePage() {
             {stopped ? "Final status" : "Auto-refresh every 5 s"}
             {updatedAt && ` · updated ${updatedAt.toLocaleTimeString()}`}
           </span>
-          <button type="button" onClick={() => void load()} disabled={loading}>
+          <button type="button" onClick={reload} disabled={loading}>
             Refresh
           </button>
         </div>
@@ -152,7 +121,7 @@ export function ArticlePage() {
                 }
                 onDone={() => {
                   setWatchUntil(Date.now() + RERUN_WATCH_MS);
-                  void load();
+                  reload();
                 }}
               />
               <label className="checkbox">

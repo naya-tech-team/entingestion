@@ -13,7 +13,9 @@ def test_repository_migrations_load_in_order() -> None:
     migrations = load(MIGRATIONS)
     assert migrations[0].version == "001"
     assert [m.version for m in migrations] == sorted(m.version for m in migrations)
-    assert "halfvec(1024)" in migrations[0].sql
+    assert "CREATE TABLE profile_tables" in migrations[0].sql
+    # Vector tables come from the embedding profiles (ingest.vectorstore.profile_tables).
+    assert not any("CREATE TABLE chunks" in m.sql for m in migrations)
 
 
 def test_bad_names_and_duplicates_are_rejected(tmp_path: Path) -> None:

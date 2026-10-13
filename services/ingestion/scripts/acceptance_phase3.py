@@ -18,6 +18,7 @@ import time
 import uuid
 from typing import Any
 
+from _tf import default_env, tf_output
 from acceptance_phase2 import Ctx, in_status, settled, wait
 from PIL import Image, ImageDraw, ImageFont
 
@@ -175,7 +176,8 @@ def uc10(ctx: Ctx) -> None:
     before = tables(ctx)["tables"][live]
     since = time.time()
     payload = json.dumps({"action": "truncate", "table": live, "confirm": live}).encode()
-    resp = ctx.lam.invoke(FunctionName=f"ingestion-{ctx.env.env}-migrate", Payload=payload)
+    migrate = tf_output("ingestion", ctx.env.env, "migrate_function_name")
+    resp = ctx.lam.invoke(FunctionName=migrate, Payload=payload)
     ctx.check(not resp.get("FunctionError"), "truncated", "UC10")
     ctx.check(tables(ctx)["tables"][live]["rows"] == 0, "table empty", "UC10")
     reindex(ctx, {"from_stage": "INDEX"})
@@ -228,7 +230,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", choices=["uc12", "uc2", "uc9", "uc10"])
     parser.add_argument("--pages", type=int, default=3)
-    parser.add_argument("--env", default="dev")
+    parser.add_argument("--env", default=default_env())
     parser.add_argument(
         "--ocr-off", action="store_true", help="expect SKIPPED (ocr_enabled = false)"
     )

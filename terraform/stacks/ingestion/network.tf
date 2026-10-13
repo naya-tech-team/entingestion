@@ -67,16 +67,18 @@ module "db_client_sg" {
   }
 }
 
-# migrate: master user straight to the writer endpoint; secret via the Secrets Manager endpoint.
+# migrate: master user straight to the writer endpoint; secret via the Secrets Manager endpoint;
+# the default registry's live table (#CONFIG item, read only) via the DynamoDB gateway endpoint.
 module "migrate_sg" {
   source = "../../modules/security_group"
 
   name        = "${local.name_prefix}-migrate"
-  description = "migrate Lambda: PostgreSQL writer and Secrets Manager"
+  description = "migrate Lambda: PostgreSQL writer, Secrets Manager, DynamoDB (registry read)"
   vpc_id      = module.vpc.vpc_id
 
   egress = {
-    db      = { description = "PostgreSQL writer endpoint", from_port = 5432, to_port = 5432, referenced_security_group_id = local.db_migrate_target }
-    secrets = { description = "Secrets Manager endpoint", from_port = 443, to_port = 443, referenced_security_group_id = module.endpoints.security_group_id }
+    db       = { description = "PostgreSQL writer endpoint", from_port = 5432, to_port = 5432, referenced_security_group_id = local.db_migrate_target }
+    secrets  = { description = "Secrets Manager endpoint", from_port = 443, to_port = 443, referenced_security_group_id = module.endpoints.security_group_id }
+    dynamodb = { description = "DynamoDB gateway endpoint (registry read)", from_port = 443, to_port = 443, prefix_list_id = module.endpoints.gateway_prefix_list_ids["dynamodb"] }
   }
 }

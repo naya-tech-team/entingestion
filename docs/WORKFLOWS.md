@@ -31,7 +31,7 @@ What happens, step by step, in each of the system's workflows: who starts it, wh
 1. **Create a process.** `POST /v1/processes {name, source, expected_count?, metadata?}`. The `process` table gets an OPEN item, `prc_<ULID>`.
 2. **Ask for an upload ticket.** `POST /v1/processes/{id}/uploads` with the file's `filename`, `content_type`, `size_bytes`, `sha256` (hex) and, optionally, `external_id`, `title` and `metadata`.
    - The API derives the `article_id`: from `source` + `external_id`, or a new id without them.
-   - It stores the upload as PENDING (24-hour TTL).
+   - It stores the upload as PENDING (the row expires after `UPLOAD_ROW_TTL_DAYS`, 15).
    - It returns a presigned PUT URL valid for 15 minutes, with the headers that are part of its signature: `Content-Type`, `x-amz-checksum-sha256` and `x-amz-meta-upload-id`.
 3. **Upload the bytes** straight to S3 with exactly those headers. S3 rejects the body if its SHA-256 differs.
 4. **Notification.** S3 sends `ObjectCreated` (prefix `raw/`) to the registrar queue.
@@ -65,15 +65,15 @@ What happens, step by step, in each of the system's workflows: who starts it, wh
    - A PDF with no text layer goes to OCR.
 6. **Normalize.** Cleans the text and fixes encodings (ftfy), producing ordered blocks with heading paths and pages. Output: `normalized/document.json`.
 7. **Chunk.** Splits the blocks into about 512 tokens each with a 64-token overlap, respecting headings. Ids are `sha256(article:version:ordinal)`. Output: `chunks/chunks.jsonl`.
-8. **Embed.** Each chunk's `embed_text` is looked up in `embedding_cache` (keyed by text hash and model); misses go to Bedrock Titan v2. Output: `embeddings/vectors.parquet`, with metrics `cache_hits` and `bedrock_calls`.
+8. **Embed.** For each table the run writes (its tenant's registry), each chunk's `embed_text` is looked up in `embedding_cache` (keyed by text hash, model, dimension, normalization and the profile fingerprint); misses go to that table's profile model. Output: `embeddings/<table>.parquet` per table, with metrics `cache_hits` and `bedrock_calls`.
 9. **Validate.** The gate checks that:
    - there are chunks, and the chunk count matches;
    - chunk ids are unique, and vectors and chunks have the same ids;
    - every vector has the right dimension, finite values and unit length;
    - no chunk is empty or oversized, and every chunk belongs to this article version.
 
-   A failed check is permanent: `E_VALIDATION_<CHECK>`. Output: `_manifest.json`; LATEST becomes STAGED.
-10. **Index** (in the VPC, as `ingest_writer`). The transactional swap: advisory lock, COPY the version in inactive, verify the count, activate it, delete older versions, COMMIT.
+   A failed check is permanent: `E_VALIDATION_<CHECK>`. Output: `_manifest.<table>.json` per table; LATEST becomes STAGED.
+10. **Index** (in the VPC, as `ingest_writer`). The transactional swap: advisory lock, insert the version inactive (batched INSERT), verify the count, activate it, delete older versions, COMMIT.
 11. **Finalize.**
     - LATEST becomes INDEXED, with `chunk_count`, `indexed_at` and `embedding_model`, and the lease is released.
     - The process membership item and its `indexed` counter are written; the completion check runs (W8).
@@ -130,11 +130,10 @@ What happens, step by step, in each of the system's workflows: who starts it, wh
 
 1. The step raises; the decorator classifies the error. The step item records `error_class`, `error_code` and `error_msg`, and the attempt is kept in `attempts`.
 2. **Transient errors** are retried by the state machine on the same step item, with `attempt` + 1:
-   - throttling: 6 attempts, exponential backoff with jitter;
-   - Lambda throttling: 8 attempts, up to 60 s apart;
-   - other transient errors: 3 attempts.
+   - throttling (Bedrock, the embedding endpoint, Lambda): 12 attempts, exponential backoff from 5 s up to 120 s apart, with full jitter;
+   - other transient errors: 3 attempts, from 2 s, with full jitter.
 3. **Retries exhausted, or a permanent error.** The Catch sends the run to **MarkFailed**:
-   - **Transient:** LATEST becomes FAILED_RETRYABLE with `next_retry_at`. The reconciler takes over (W9).
+   - **Transient:** LATEST becomes FAILED_RETRYABLE with `next_retry_at` (`RETRY_BASE_SECONDS` x 2^n, 900 s base; throttling `RETRY_THROTTLE_SECONDS` x 2^min(n, 3), 300 s base). The reconciler takes over (W9).
    - **Permanent:** LATEST becomes FAILED_PERMANENT and the process counts it as failed (first outcome). MarkFailed counts it (`ArticlesFailedPermanent`, by `error_code`), the reconciler's next hourly digest lists it, and the execution ends Failed.
    - **`E_EMPTY_TEXT`:** the article is SKIPPED and counted as skipped.
 4. **Lost lease.** If a step finds it has lost the lease (another run took over), it raises `IngestStale`. The execution ends quietly as Stale, and LATEST is untouched.
@@ -173,9 +172,9 @@ For a single article use `POST /v1/ingest {"article_ids": [...], "force": true, 
 EventBridge Scheduler invokes the reconciler every hour, and weekly with `{"drift": true}`. Each run:
 
 1. **Expired leases** (`gsi3-lease`): re-queue the article, resuming where staged output is intact. This covers a Lambda that crashed mid-step (UC6).
-2. **FAILED_RETRYABLE past `next_retry_at`:** re-queue with backoff. After 5 retries: FAILED_PERMANENT, counted, and an alert.
-3. **STAGED for over 30 minutes:** validated but never indexed, so re-queue from INDEX.
-4. **Missed stream events** (UC7): producer articles updated today or yesterday (`gsi_updated`) with no matching LATEST (missing, or a different SHA-256) are enqueued. Articles updated in the last 5 minutes are left to the stream.
+2. **FAILED_RETRYABLE past `next_retry_at`:** re-queue with backoff. After 5 retries (`RECONCILE_MAX_RETRIES`): FAILED_PERMANENT, counted, and an alert.
+3. **STAGED for over 30 minutes** (`RECONCILE_STAGED_GRACE_SECONDS`): validated but never indexed, so re-queue from INDEX.
+4. **Missed stream events** (UC7): producer articles updated today or yesterday (the 16 partitions of `gsi_updated_shard`) with no matching LATEST (missing, or a different SHA-256) are enqueued. Articles updated in the last 5 minutes (`RECONCILE_STREAM_GRACE_SECONDS`) are left to the stream.
 5. **Open process summaries:** run the completion check (W8).
 6. **Weekly drift:**
    - The `query` Lambda counts active chunks per article in `chunks_active`.
@@ -184,7 +183,7 @@ EventBridge Scheduler invokes the reconciler every hour, and weekly with `{"drif
 
 Everything the reconciler does is idempotent: it enqueues work (the dispatcher and Claim decide what really runs), or moves items it re-checks in a conditional write.
 
-**Run it by hand:** `aws lambda invoke --function-name ingestion-<env>-reconciler --payload '{}' /dev/stdout`. Add `'{"drift": true}'` for the drift check. **Watch it:** the dashboard's "Reconciler" panel.
+**Run it by hand:** `aws lambda invoke --function-name ingestion-<env>-reconciler:live --payload '{}' /dev/stdout` (every function name is in the ingestion output `function_names`). Add `'{"drift": true}'` for the drift check. **Watch it:** the dashboard's "Reconciler" panel.
 
 ## W10. OCR for scanned and very large PDFs
 
@@ -209,7 +208,7 @@ The limit is 500 MB (Textract async). **Status:** built and unit-tested; it need
    - **Plan:** `reindex_plan` writes the article list to `_reindex/<execution>.json` (it expires after 7 days).
    - **AnyArticles:** if there are none, it's done.
    - **Enqueue:** a Distributed Map reads the plan in batches (EXPRESS children). `reindex_enqueue` sends messages with `trigger = BACKFILL` and `target_table` to the backfill queue.
-3. **Runs.** The dispatcher starts each run at Embed. Embed uses the target's model and dimension, and writes `embeddings/<table>.parquet` and `_manifest.<table>.json`, so the live table's staged files are untouched. Index loads the target table; the live table keeps serving.
+3. **Runs.** The dispatcher starts each run at Embed. Embed uses the target's model and dimension, and writes `embeddings/<table>.parquet` and `_manifest.<table>.json` (every table has its own), so the live table's staged files are untouched. Index loads the target table; the live table keeps serving.
 4. **Evaluate:** `uv run python scripts/evaluate.py --env <env> --table chunks_compact --min-recall10 0.9`. It compares against the live table's baseline.
 5. **Switch:** `POST /v1/tables/active {"table": "chunks_compact"}`. The `chunks_active` view is replaced in one transaction.
 6. **Roll back if needed:** the same call with the old table. Both tables keep their rows.
@@ -221,36 +220,34 @@ The limit is 500 MB (Textract async). **Status:** built and unit-tested; it need
 **When:** rows were lost or corrupted, or the drift check reports many mismatches.
 
 1. `POST /v1/reindex {"target_table": "chunks_primary", "from_stage": "INDEX"}`.
-2. Each run starts at Index and reloads the staged vectors (`embeddings/…parquet`) with the same swap as W2. **No Bedrock calls**: cost and time are database writes only.
+2. Each run starts at Index and reloads the table's staged vectors (`embeddings/<table>.parquet`, checked against `_manifest.<table>.json`) with the same swap as W2. **No Bedrock calls**: cost and time are database writes only.
 3. Check with `GET /v1/tables`: row and article counts per table.
-
-Verified on dev (UC10): the live table was truncated, then restored to 130 rows over 23 articles, with every run starting at INDEX.
 
 ## W13. Add a vector table for a new model
 
-1. **Migration.** Add `services/ingestion/db/migrations/00N_<table>.sql`, modelled on `002_chunks_compact.sql`:
-   - `CREATE TABLE … (LIKE chunks_primary INCLUDING DEFAULTS INCLUDING GENERATED)`;
-   - set the embedding column to `halfvec(<dim>)` and add the primary key;
-   - create the HNSW, version, GIN and tenant indexes;
-   - grant `ingest_writer` and `ingest_reader`.
-2. **Registry.** Add `Target("<table>", "<bedrock model id>", <dim>)` to `TARGETS` in `src/ingest/vectorstore/targets.py`.
-3. **IAM.** If the model is new, allow `bedrock:InvokeModel` on its ARN in the embed and eval policies (`terraform/stacks/ingestion/iam.tf`).
-4. **Release** it (W14), then invoke `migrate`; `GET /v1/tables` lists the new table, empty.
-5. **Fill and evaluate** it (W11).
+No SQL and no code: a vector table is an embedding profile in the tfvars.
+
+1. **Model access.** Enable the Bedrock model in the region (or store an `openai_compatible` endpoint's API key in Secrets Manager).
+2. **Profile.** Add it to `embedding_profiles` in `terraform/envs/<env>/ingestion.tfvars`, for example `multilingual = { provider = "bedrock", model = "<model id>", dimension = 1024 }`. The stack derives the `bedrock:InvokeModel` grants and every function's `EMBEDDING_PROFILES` from it.
+3. **Release** it: `make -C terraform deploy ENV=<env> STACK=ingestion`. Its `migrate` step generates `chunks_<name>` from the profile (`"profile_tables_created": ["chunks_<name>"]`); `GET /v1/tables` lists the new table, empty.
+4. **Fill and evaluate** it (W11).
+
+Details: [RUNBOOK.md, Add a model](RUNBOOK.md#add-a-model).
 
 ## W14. Release a change
 
 ![Delivery](diagrams/png/10-delivery-teardown.png)
 
 1. **Branch** from `main` and make the change.
-2. **Check locally:**
+2. **Check locally** (CI is disabled):
    - `make -C terraform check`;
-   - in each service changed: `uv run ruff check . && uv run mypy && uv run pytest`;
-   - for dependency changes: the license gate (`uv run python ../../tools/check_licenses.py`).
-3. **Build:** `services/ingestion/scripts/build_lambda.sh all` and/or `services/producer/scripts/build_lambda.sh`. The zips are reproducible, so unchanged code produces no Lambda update.
+   - in each Python service changed (and in `services/common` if it changed): `uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest`;
+   - for the web app: `npm run typecheck && npm test && npm run build` in `services/ui/web`;
+   - for dependency changes: the license gates (`uv run python ../../tools/check_licenses.py`; `npm run licenses`).
+3. **Build:** `make -C terraform build` (every Lambda zip), or one service's `scripts/build_lambda.sh`. The zips are reproducible, so unchanged code produces no Lambda update.
 4. **Plan:** `make -C terraform plan ENV=dev STACK=<stack>`. Review it: no data store may be destroyed or replaced. A module change must leave the other stack's plan with no changes.
 5. **Apply:** `make -C terraform apply ENV=dev STACK=<stack>`. It applies exactly the saved plan.
-6. **Migrate** if there are new SQL files: `make -C terraform migrate ENV=<env>` (`make deploy` does it after the apply; migrations are expand-only, see RUNBOOK "Deploy").
+6. **Migrate** if there are new SQL files or embedding profiles: `make -C terraform migrate ENV=<env>` (`make deploy` does it after the apply; migrations are expand-only, see RUNBOOK "Deploy").
 7. **Verify:** Bruno UC1 (or `gate_phase1.py` with 3 articles). Then check the dashboard and alarms.
 8. **Promote:** repeat steps 4–7 with `ENV=prod`.
 9. **Module release:** if a module changed, tag it after merging: `git tag -a modules/<name>/vX.Y.Z -m "<change>"`. Semantic versioning applies; a breaking interface change is a new major.
@@ -258,7 +255,7 @@ Verified on dev (UC10): the live table was truncated, then restored to 130 rows 
 ## W15. Tear down a disposable environment
 
 1. `make -C terraform destroy-all ENV=dev DRY_RUN=1` runs the preflight and lists what would be deleted. Prod is refused.
-2. `make -C terraform destroy-all ENV=dev`. For each stack, ingestion first and then producer:
+2. `make -C terraform destroy-all ENV=dev`. For each stack, ui first, then ingestion, then producer:
    1. confirm by typing the env name;
    2. Aurora (if present) is deleted first;
    3. protected resources leave the state;

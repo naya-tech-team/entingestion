@@ -45,7 +45,7 @@ def searching(env: Env, monkeypatch: pytest.MonkeyPatch) -> FakeLambda:
     )
     monkeypatch.setenv("SOURCE_ACCESS_PARAMETER", PARAMETER)
     monkeypatch.setenv("QUERY_FUNCTION_NAME", "ingestion-test-query")
-    monkeypatch.setenv("RERANK_MODEL_ARN", "arn:aws:bedrock:us-west-2::foundation-model/rerank")
+    monkeypatch.setenv("RERANK_MODEL_ARN", f"arn:aws:bedrock:{REGION}::foundation-model/rerank")
     aws.reset()
     access.reset()
     titan = FakeTitan()

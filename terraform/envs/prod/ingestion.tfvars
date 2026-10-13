@@ -1,20 +1,9 @@
 # ingestion stack, prod. Code: terraform/stacks/ingestion. Usage: make plan ENV=prod STACK=ingestion
+# Region and mandatory tags: envs/prod/common.tfvars.
 
-env    = "prod"
-region = "us-west-2"
+env = "prod"
 
-mandatory_tags = {
-  created_by           = "naveen"
-  created_date         = "" # required: the date of the first prod apply
-  owner                = "naveen"
-  internal_client_code = "" # required: fill in
-  client               = "" # required: fill in
-  project_name         = "entingestion"
-  division             = "" # required: fill in
-}
-
-producer_ssm_prefix = "/entingestion/prod/producer"
-table_prefix        = ""
+table_prefix = ""
 
 # Built by services/ingestion/scripts/build_lambda.sh; the stack uploads them to its artifacts bucket.
 lambda_core_zip = "../../../services/ingestion/dist/core.zip"
@@ -50,7 +39,7 @@ freshness_alarm_seconds = 900
 # (alarm_emails validation) until an address is set. See docs/RUNBOOK.md "Alarms".
 alarm_emails = []
 
-# Disaster recovery: AWS Backup of Aurora and the tables, daily, 35 days, copied to us-east-2.
+# Disaster recovery: AWS Backup of Aurora and the tables, daily, 35 days, copied to another region.
 backup_enabled     = true
 backup_copy_region = "us-east-2"
 
@@ -63,19 +52,24 @@ index_reserved_concurrency       = 10
 log_retention_days = 90
 log_level          = "INFO"
 
-# Embedding models (docs/ARCHITECTURE.md "Embedding models", RUNBOOK "Add a model"). The default
-# is the two Titan v2 tables (primary live, compact), as before profiles. To add a model,
-# add a profile here, apply (make deploy: migrate creates chunks_<name>), then reindex/switch.
-# embedding_profiles = {
-#   primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-#   compact  = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
-#   # Cohere Embed Multilingual v3 on Bedrock (enable model access first). 512-token input limit:
-#   # Validate fails chunks above it, so chunk smaller (or use parent-child chunking) first.
-#   multilingual = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
-#   # Later: any OpenAI-compatible endpoint, e.g. a LiteLLM proxy (reachable from the internet:
-#   # Embed runs outside the VPC). The API key lives in Secrets Manager under that name.
-#   # litellm_768 = { provider = "openai_compatible", model = "nomic-embed-text", dimension = 768,
-#   #                 base_url = "https://litellm.example.com/v1", api_key_secret = "entingestion/prod/litellm" }
-# }
-# default_profile = "primary"
+# Embedding models (docs/ARCHITECTURE.md "Embedding models", RUNBOOK "Add a model"): one pgvector
+# table each, chunks_<name>. The stack has no default model: these are the only place models are
+# named. To add a model, add a profile here, apply (make deploy: migrate creates chunks_<name>),
+# then reindex/switch. Never change a profile's model or dimension once its table has data.
+embedding_profiles = {
+  primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+  compact = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
+  # Cohere Embed Multilingual v3 on Bedrock (enable model access first). 512-token input limit:
+  # Validate fails chunks above it, so chunk smaller (or use parent-child chunking) first.
+  # multilingual = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
+  # Any OpenAI-compatible endpoint, e.g. a LiteLLM proxy (reachable from the internet: Embed runs
+  # outside the VPC). The API key lives in Secrets Manager under that name.
+  # litellm_768 = { provider = "openai_compatible", model = "nomic-embed-text", dimension = 768,
+  #                 base_url = "https://litellm.example.com/v1", api_key_secret = "entingestion/prod/litellm" }
+}
+default_profile = "primary" # chunks_primary is live for tenants without their own registry
+
+# Bedrock reranking model for POST /v1/search with rerank (only used when rerank_enabled).
+rerank_model_id = "amazon.rerank-v1:0"
+
 # tenant_profiles = {} # tenant_id => profile: a new tenant's first table

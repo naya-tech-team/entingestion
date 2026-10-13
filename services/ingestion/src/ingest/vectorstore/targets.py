@@ -1,11 +1,11 @@
-"""Vector tables and the embedding profile each one holds (brief §7.3: one table per
-model/dimension). Every configured embedding profile (ingest.embedding.profiles) is a table,
-chunks_<profile>; the migrate function creates the tables of new profiles
-(ingest.vectorstore.profile_tables), reindex fills them, and a switch makes one live.
+"""Vector tables and the embedding profile each one holds: one table per model and dimension.
+Every configured embedding profile (ingest.embedding.profiles) is a table, chunks_<profile>; the
+migrate function creates them (ingest.vectorstore.profile_tables), reindex fills a new one, and
+a switch makes one live.
 
-Each table keeps its own staged vectors and manifest, so re-embedding into a new table never
-overwrites what the current table can be rebuilt from. chunks_primary, the original table,
-keeps the original file names, so data staged before tables existed stays usable.
+Each table keeps its own staged vectors and manifest (embeddings/<table>.parquet and
+_manifest.<table>.json), so re-embedding into a new table never overwrites what the current
+table can be rebuilt from.
 """
 
 from __future__ import annotations
@@ -13,13 +13,10 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
+from ingest import ids
 from ingest.config import get_settings
 from ingest.embedding.profiles import EmbeddingProfile
 from ingest.errors import ErrorCode, make_error
-from ingest.ids import STAGING_FILES, embedding_cache_key
-
-# The first table: its staged files have no table in their names.
-DEFAULT_TABLE = "chunks_primary"
 
 
 @dataclass(frozen=True)
@@ -43,24 +40,18 @@ class Target:
         return self.profile.normalize
 
     @property
-    def is_default(self) -> bool:
-        """The original table (original staged file names)."""
-        return self.table == DEFAULT_TABLE
-
-    @property
     def vectors_file(self) -> str:
-        return STAGING_FILES["EMBED"] if self.is_default else f"embeddings/{self.table}.parquet"
+        return ids.vectors_file(self.table)
 
     @property
     def manifest_file(self) -> str:
-        return STAGING_FILES["VALIDATE"] if self.is_default else f"_manifest.{self.table}.json"
+        return ids.manifest_file(self.table)
 
     def cache_key(self, embed_text: str) -> str:
-        """Embedding cache key: sha256(embed_text)#model@dim@norm for Bedrock Titan (the key from
-        before profiles, so its entries stay valid), plus #<profile fingerprint> for every other
-        model, so different endpoints or settings never share entries."""
-        key = embedding_cache_key(embed_text, self.model_id, self.dimension, self.normalize)
-        return key if self.profile.is_titan else f"{key}#{self.profile.fingerprint}"
+        """Embedding cache key: sha256(embed_text)#model@dim@norm#<profile fingerprint>, so
+        different endpoints or settings never share entries."""
+        key = ids.embedding_cache_key(embed_text, self.model_id, self.dimension, self.normalize)
+        return f"{key}#{self.profile.fingerprint}"
 
 
 class _Targets(Mapping[str, Target]):
@@ -68,7 +59,7 @@ class _Targets(Mapping[str, Target]):
     and Lambdas see the environment's profiles)."""
 
     def _all(self) -> dict[str, Target]:
-        profiles = get_settings().embedding_profiles
+        profiles = get_settings().embedding.profiles
         return {p.table: Target(p) for p in profiles.values()}
 
     def __getitem__(self, table: str) -> Target:

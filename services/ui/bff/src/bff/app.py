@@ -8,8 +8,8 @@ unchanged.
 The Operations routes (/api/ops/*) add read-only views (overview, articles by status, the
 table registry, search) and three actions: re-run articles, re-run a process's failures and
 redrive the DLQ. The BFF caps the actions beyond the control API's own validation (at most
-100 article ids, no from_stage, a redrive max of at most 200) and logs each one's route,
-dry_run and count, never its body.
+MAX_RERUN_IDS article ids, no from_stage, a redrive max of at most MAX_REDRIVE; bff.config)
+and logs each one's route, dry_run and count, never its body.
 
 Browsers resend cached basic-auth credentials on cross-site requests, so every POST must carry
 X-Requested-With (which a cross-site form can't set without a CORS preflight that nothing
@@ -20,34 +20,32 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qsl
 
+import urllib3
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.event_handler import LambdaFunctionUrlResolver, Response, content_types
 from aws_lambda_powertools.logging import correlation_paths
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from bff import upstream
+from bff.config import Settings, get_settings
 
 logger = Logger()
 app = LambdaFunctionUrlResolver()
 
-PRODUCER = "PRODUCER_API_URL"
-CONTROL = "CONTROL_API_URL"
+Api = Literal["producer", "control"]
+PRODUCER: Api = "producer"
+CONTROL: Api = "control"
 
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 CSRF_HEADER = "x-requested-with"
 CSRF_VALUE = "entingestion-ui"
 IDEMPOTENCY_HEADER = "idempotency-key"
-
-# Operations guard rails (docs/UI.md "Operations").
-MAX_RERUN_IDS = 100
-MAX_REDRIVE = 200
 
 Errors = list[dict[str, Any]]
 
@@ -148,12 +146,10 @@ def ops_redrive() -> Response[str]:
 def _check_rerun(body: dict[str, Any]) -> Errors:
     errors: Errors = []
     ids = body.get("article_ids")
-    if isinstance(ids, list) and len(ids) > MAX_RERUN_IDS:
+    cap = get_settings().max_rerun_ids
+    if isinstance(ids, list) and len(ids) > cap:
         errors.append(
-            {
-                "loc": ["body", "article_ids"],
-                "msg": f"at most {MAX_RERUN_IDS} article ids from the UI",
-            }
+            {"loc": ["body", "article_ids"], "msg": f"at most {cap} article ids from the UI"}
         )
     if "from_stage" in body:
         errors.append(
@@ -167,10 +163,9 @@ def _check_rerun(body: dict[str, Any]) -> Errors:
 
 def _check_redrive(body: dict[str, Any]) -> Errors:
     value = body.get("max")
-    if "max" in body and (
-        not isinstance(value, int) or isinstance(value, bool) or value > MAX_REDRIVE
-    ):
-        return [{"loc": ["body", "max"], "msg": f"an integer of at most {MAX_REDRIVE} from the UI"}]
+    cap = get_settings().max_redrive
+    if "max" in body and (not isinstance(value, int) or isinstance(value, bool) or value > cap):
+        return [{"loc": ["body", "max"], "msg": f"an integer of at most {cap} from the UI"}]
     return []
 
 
@@ -227,7 +222,11 @@ def _rejected(method: str, ids: tuple[str, ...]) -> Response[str] | None:
     return None
 
 
-def _forward(method: str, api: str, template: str, *ids: str, query: bool = False) -> Response[str]:
+def _base_url(settings: Settings, api: Api) -> str:
+    return settings.producer_api_url if api == PRODUCER else settings.control_api_url
+
+
+def _forward(method: str, api: Api, template: str, *ids: str, query: bool = False) -> Response[str]:
     rejected = _rejected(method, ids)
     if rejected is not None:
         return rejected
@@ -241,13 +240,15 @@ def _forward(method: str, api: str, template: str, *ids: str, query: bool = Fals
         if key:
             headers[IDEMPOTENCY_HEADER] = key
 
+    settings = get_settings()
     started = time.monotonic()
-    log = {"method": method, "upstream": api.removesuffix("_API_URL").lower(), "route": template}
+    log = {"method": method, "upstream": api, "route": template}
     try:
         result = upstream.call(
             method,
-            os.environ[api],
+            _base_url(settings, api),
             template.format(*ids),
+            timeout=urllib3.Timeout(connect=settings.connect_timeout, read=settings.read_timeout),
             query=_query() if query else None,
             body=body,
             headers=headers,
@@ -319,4 +320,5 @@ def _on_unexpected(exc: Exception) -> Response[str]:
 
 @logger.inject_lambda_context(correlation_id_path=correlation_paths.LAMBDA_FUNCTION_URL)
 def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+    get_settings()  # cached: missing configuration fails the first invocation, not a route
     return app.resolve(event, context)

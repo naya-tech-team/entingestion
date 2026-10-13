@@ -1,4 +1,4 @@
-# Producer articles stream -> Pipe (filters §4.1) -> ingest queue -> dispatcher.
+# Producer articles stream -> Pipe (STAGED inserts/updates and REMOVEs) -> ingest queue -> dispatcher.
 
 data "aws_iam_policy_document" "pipe_producer_key" {
   statement {

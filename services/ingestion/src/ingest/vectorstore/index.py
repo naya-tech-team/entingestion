@@ -1,13 +1,13 @@
-"""Index: transactional write + swap (brief §7.2), and the delete path.
+"""Index: transactional write + swap, and the delete path.
 
     BEGIN; SELECT pg_advisory_xact_lock(hashtext(:article_id));
-      COPY into a temp table -> INSERT ... ON CONFLICT (chunk_id) DO UPDATE  (version N+1, inactive)
+      batched INSERT ... ON CONFLICT (chunk_id) DO UPDATE  (version N+1, inactive)
       verify count = :chunk_count
       UPDATE ... SET is_active = (doc_version = :v) WHERE article_id = :a
       DELETE ... WHERE article_id = :a AND doc_version < :v
     COMMIT;
 
-Readers keep seeing version N until the commit, then only N+1 (requirement 5).
+Readers keep seeing version N until the commit, then only N+1: never a mix, never nothing.
 
 A metadata-only change (Claim's METADATA action) rewrites the article's descriptive columns on
 its active rows in place: update_metadata.
@@ -61,7 +61,7 @@ _CASTS = {
     "heading_path": "::text[]",
     "published_at": "::date",
 }
-DEFAULT_TENANT = "default"  # articles whose producer row has no tenant (migration 005)
+DEFAULT_TENANT = "default"  # articles whose producer row has no tenant (tenant_id NOT NULL)
 # Chunk metadata keys that come from the article row, not the content.
 ARTICLE_KEYS = ("tenant_id", "source", "published_at", "article")
 
@@ -297,11 +297,12 @@ class PgVectorStore:
 
 def get_vector_store(table: str | None = None) -> VectorStore:
     settings = get_settings()
-    settings.require("db_host")
+    settings.require("db.host")
     return PgVectorStore(connection(settings), table or settings.target_table)
 
 
 def delete_everywhere(article_id: str, doc_version: int = 0) -> int:
-    """A deleted article leaves every vector table, live or not (brief UC8), and stays gone:
+    """A deleted article leaves every vector table, live or not (docs/USE_CASES.md UC8), and stays
+    gone:
     each table's delete also records the tombstone at doc_version."""
     return sum(get_vector_store(table).delete_article(article_id, doc_version) for table in TARGETS)

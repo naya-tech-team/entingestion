@@ -34,7 +34,7 @@ def message_for(
     """The message that re-runs an article, or None if neither side has it.
 
     resume: if the article didn't finish cleanly (failed, stuck, interrupted), start where the
-    previous run's staged output is still intact (brief §10), else re-run it from Fetch. An
+    previous run's staged output is still intact (ingest.resume), else re-run it from Fetch. An
     article that's already indexed with the producer's content is left to the normal unchanged
     check. An explicit from_stage or force wins.
     """
@@ -83,7 +83,7 @@ def _needs_rerun(latest: dict[str, Any] | None, row: dict[str, Any]) -> bool:
 
 def enqueue(messages: Iterable[IngestMessage], queue_url: str | None = None) -> int:
     """Send messages to the ingest queue in batches. Returns how many were sent."""
-    url = queue_url or get_settings().ingest_queue_url
+    url = queue_url or get_settings().queues.ingest_url
     batch: list[IngestMessage] = []
     sent = 0
     for message in messages:

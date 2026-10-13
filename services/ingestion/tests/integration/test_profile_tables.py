@@ -1,6 +1,8 @@
 """Vector tables from embedding profiles (ingest.vectorstore.profile_tables) on a real pgvector
-database: a 384-d profile's table has chunks_primary's structure, takes writes and serves
-one tenant to ingest_reader, and ensure() is idempotent and refuses a changed dimension."""
+database prepared as the migrate function does it (the pg fixture: the test profiles' tables):
+a custom 384-d profile's table has the same structure as the default profiles' tables, takes
+writes and serves one tenant to ingest_reader, and ensure() is idempotent and refuses a changed
+dimension."""
 
 from __future__ import annotations
 
@@ -12,10 +14,11 @@ from typing import Any
 import pytest
 
 from ingest.config import get_settings
-from ingest.embedding.profiles import EmbeddingProfile, builtin_profiles
+from ingest.embedding.profiles import EmbeddingProfile, parse
 from ingest.query import search_hybrid
 from ingest.vectorstore.index import PgVectorStore
 from ingest.vectorstore.profile_tables import ProfileTableError, dimension_of, ensure
+from tests.conftest import PROFILE_ENV, PROFILES
 from tests.integration.test_index import rows
 from tests.integration.test_tenants import as_role
 
@@ -25,12 +28,41 @@ MINI = EmbeddingProfile(
     "mini_384", "openai_compatible", "all-minilm", 384, base_url="https://emb.example/v1"
 )
 TABLE = "chunks_mini_384"
+DEFAULTS = list(parse(PROFILE_ENV).profiles.values())
+# Every vector table's columns: (name, type, nullable, default, generated).
+COLUMNS = [
+    ("chunk_id", "text", "NO", None, "NEVER"),
+    ("article_id", "text", "NO", None, "NEVER"),
+    ("doc_version", "integer", "NO", None, "NEVER"),
+    ("ordinal", "integer", "NO", None, "NEVER"),
+    ("parent_id", "text", "YES", None, "NEVER"),
+    ("process_id", "text", "YES", None, "NEVER"),
+    ("tenant_id", "text", "NO", None, "NEVER"),
+    ("is_active", "boolean", "NO", "false", "NEVER"),
+    ("text", "text", "NO", None, "NEVER"),
+    ("embed_text", "text", "NO", None, "NEVER"),
+    ("heading_path", "ARRAY", "YES", None, "NEVER"),
+    ("page_start", "integer", "YES", None, "NEVER"),
+    ("page_end", "integer", "YES", None, "NEVER"),
+    ("token_count", "integer", "NO", None, "NEVER"),
+    ("metadata", "jsonb", "NO", "'{}'::jsonb", "NEVER"),
+    ("embedding", "USER-DEFINED", "NO", None, "NEVER"),
+    ("embedding_model", "text", "NO", None, "NEVER"),
+    ("pipeline_version", "text", "NO", None, "NEVER"),
+    ("created_at", "timestamp with time zone", "NO", "now()", "NEVER"),
+    ("published_at", "date", "YES", None, "NEVER"),
+    ("source", "text", "YES", None, "NEVER"),
+    ("content_tsv", "tsvector", "YES", None, "ALWAYS"),
+    ("parent_text", "text", "YES", None, "NEVER"),
+    ("char_start", "integer", "YES", None, "NEVER"),
+    ("char_end", "integer", "YES", None, "NEVER"),
+]
 
 
 @pytest.fixture(autouse=True)
 def mini_profile(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     profiles = {
-        "primary": {"model": "amazon.titan-embed-text-v2:0", "dimension": 1024},
+        **PROFILES,
         "mini_384": {
             "provider": "openai_compatible",
             "model": "all-minilm",
@@ -79,17 +111,36 @@ def grants(pg: Any, table: str) -> set[tuple[str, str]]:
     )
 
 
-def test_a_profile_table_has_the_original_tables_structure(pg: Any) -> None:
-    assert ensure(pg, [MINI, *builtin_profiles().values()]) == [TABLE]
+def test_every_profile_table_has_the_same_structure(pg: Any) -> None:
+    assert ensure(pg, [MINI, *DEFAULTS]) == [TABLE]  # the defaults exist already
 
-    assert dimension_of(pg, TABLE) == 384
+    assert (dimension_of(pg, TABLE), dimension_of(pg, "chunks_primary")) == (384, 1024)
+    assert dimension_of(pg, "chunks_compact") == 512
     template = columns(pg, "chunks_primary")
-    mine = columns(pg, TABLE)
-    assert [c[0] for c in mine] == [c[0] for c in template]
-    assert mine == template  # halfvec's size isn't in information_schema: checked above
-    assert indexes(pg, TABLE) == indexes(pg, "chunks_primary")
-    assert policies(pg, TABLE) == policies(pg, "chunks_primary")
-    assert grants(pg, TABLE) == grants(pg, "chunks_primary")
+    assert [c[:5] for c in template] == COLUMNS
+    assert "ingest_heading_text(heading_path)" in str(template[21][5])
+    for table in (TABLE, "chunks_compact"):
+        assert columns(pg, table) == template  # halfvec's size isn't in information_schema
+        assert indexes(pg, table) == indexes(pg, "chunks_primary")
+        assert policies(pg, table) == policies(pg, "chunks_primary")
+        assert grants(pg, table) == grants(pg, "chunks_primary")
+    assert {i.split(":")[0] for i in indexes(pg, TABLE)} == {
+        f"T_{s}"
+        for s in ("pkey", "embedding_hnsw", "article_version", "tsv", "tenant", "published_at",
+                  "source")
+    }  # fmt: skip
+    hnsw = next(i for i in indexes(pg, TABLE) if i.startswith("T_embedding_hnsw"))
+    assert "halfvec_cosine_ops" in hnsw
+    assert "m='16', ef_construction='64'" in hnsw
+    assert hnsw.endswith("WHERE is_active")
+    assert {p[0] for p in policies(pg, TABLE)} == {
+        "reader_one_tenant",
+        "writer_all",
+        "views_read_all",
+    }
+    assert grants(pg, TABLE) == {
+        ("ingest_writer", p) for p in ("SELECT", "INSERT", "UPDATE", "DELETE")
+    } | {("ingest_reader", "SELECT"), ("ingest_views", "SELECT")}
 
     def constraints(table: str, kinds: str) -> list[tuple[str, str]]:
         return pg.execute(
@@ -98,7 +149,7 @@ def test_a_profile_table_has_the_original_tables_structure(pg: Any) -> None:
             (table, list(kinds)),
         ).fetchall()
 
-    # NOT NULLs (named constraints since PostgreSQL 18) as LIKE copies them, as for compact.
+    # NOT NULLs (named constraints since PostgreSQL 18).
     not_null = sorted(d for _, d in constraints("chunks_primary", "n"))
     assert sorted(d for _, d in constraints(TABLE, "n")) == not_null
     assert constraints(TABLE, "pc") == [
@@ -108,12 +159,12 @@ def test_a_profile_table_has_the_original_tables_structure(pg: Any) -> None:
     rls = pg.execute("SELECT relrowsecurity FROM pg_class WHERE relname = %s", (TABLE,))
     assert rls.fetchone() == (True,)
     recorded = pg.execute(
-        "SELECT profile, table_name, dimension, created FROM profile_tables ORDER BY profile"
+        "SELECT profile, table_name, dimension, model FROM profile_tables ORDER BY profile"
     ).fetchall()
     assert recorded == [
-        ("compact", "chunks_compact", 512, False),
-        ("mini_384", TABLE, 384, True),
-        ("primary", "chunks_primary", 1024, False),
+        ("compact", "chunks_compact", 512, PROFILES["compact"]["model"]),
+        ("mini_384", TABLE, 384, "all-minilm"),
+        ("primary", "chunks_primary", 1024, PROFILES["primary"]["model"]),
     ]
 
 
@@ -161,7 +212,7 @@ def test_a_changed_dimension_is_refused(pg: Any) -> None:
     ensure(pg, [MINI])
     with pytest.raises(ProfileTableError, match="384-d embeddings but profile mini_384 is 768-d"):
         ensure(pg, [replace(MINI, dimension=768)])
-    bad = replace(builtin_profiles()["primary"], dimension=512)
+    bad = replace(parse(PROFILE_ENV).profiles["primary"], dimension=512)
     with pytest.raises(ProfileTableError, match="chunks_primary has 1024-d"):
         ensure(pg, [bad])
     assert dimension_of(pg, "chunks_nothing") is None

@@ -3,14 +3,16 @@ import { ApiError } from "./api";
 import { Sha256 } from "./sha256";
 import type { Process, UploadTicket } from "./types";
 import {
+  addEntries,
   contentTypeFor,
   createHasher,
   DOCX_TYPE,
   type FileState,
   type Poster,
   HASH_SLICE_BYTES,
-  MAX_FILE_BYTES,
+  UI_MAX_FILE_BYTES,
   putHeaders,
+  queueProgress,
   runBatch,
   sha256File,
   validateFile,
@@ -41,17 +43,53 @@ describe("contentTypeFor", () => {
 describe("validateFile", () => {
   it("accepts an allowed, non-empty file up to 5 GiB", () => {
     expect(validateFile({ name: "a.pdf", size: 1 })).toBeNull();
-    expect(validateFile({ name: "a.pdf", size: MAX_FILE_BYTES })).toBeNull();
+    expect(validateFile({ name: "a.pdf", size: UI_MAX_FILE_BYTES })).toBeNull();
   });
 
   it("rejects other types, empty and oversized files, and bad names", () => {
     expect(validateFile({ name: "a.png", size: 10 })).toMatch(/Unsupported type/);
     expect(validateFile({ name: "a.txt", size: 0 })).toMatch(/empty/);
-    expect(validateFile({ name: "a.txt", size: MAX_FILE_BYTES + 1 })).toMatch(/5 GiB/);
+    expect(validateFile({ name: "a.txt", size: UI_MAX_FILE_BYTES + 1 })).toBe("The file is larger than 5.0 GiB");
     expect(validateFile({ name: `${"x".repeat(252)}.txt`, size: 1 })).toMatch(/255/);
     expect(validateFile({ name: "a\u0007.txt", size: 1 })).toMatch(/control/);
   });
 });
+describe("the file queue", () => {
+  const file = (name: string, size = 10, lastModified = 1) => ({ name, size, lastModified });
+  let n = 0;
+  const newId = () => `f${++n}`;
+
+  it("appends new files with an id, blank metadata and their validation error", () => {
+    const entries = addEntries([], [file("a.pdf"), file("b.png")], newId);
+    expect(entries.map((e) => [e.file.name, e.title, e.externalId, e.state])).toEqual([
+      ["a.pdf", "", "", null],
+      ["b.png", "", "", null],
+    ]);
+    expect(entries[0]?.error).toBeNull();
+    expect(entries[1]?.error).toMatch(/Unsupported type/);
+    expect(new Set(entries.map((e) => e.id)).size).toBe(2);
+  });
+
+  it("skips a file already queued (same name, size and time) but keeps a changed one", () => {
+    const first = addEntries([], [file("a.pdf")], newId);
+    const again = addEntries(first, [file("a.pdf"), file("a.pdf", 11), file("a.pdf", 10, 2), file("a.pdf", 11)], newId);
+    expect(again).toHaveLength(3);
+    expect(again[0]).toBe(first[0]);
+  });
+
+  it("counts done and failed files of the started batch", () => {
+    const states: (FileState | null)[] = [
+      null,
+      { phase: "queued" },
+      { phase: "done", articleId: "a", uploadId: "u" },
+      { phase: "failed", message: "x" },
+      { phase: "uploading", progress: 0.5, attempt: 1 },
+    ];
+    expect(queueProgress(states.map((state) => ({ state })))).toEqual({ done: 1, failed: 1, total: 4 });
+    expect(queueProgress([])).toEqual({ done: 0, failed: 0, total: 0 });
+  });
+});
+
 
 // --- hashing ----------------------------------------------------------------------------------
 

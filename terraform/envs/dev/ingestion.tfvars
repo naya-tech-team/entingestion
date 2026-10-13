@@ -1,20 +1,9 @@
 # ingestion stack, dev. Code: terraform/stacks/ingestion. Usage: make plan ENV=dev STACK=ingestion
+# Region and mandatory tags: envs/dev/common.tfvars.
 
-env    = "dev"
-region = "us-west-2"
+env = "dev"
 
-mandatory_tags = {
-  created_by           = "naveen"
-  created_date         = "2026-10-11"
-  owner                = "naveen"
-  internal_client_code = "TBD" # placeholder: replace with the real value
-  client               = "TBD" # placeholder: replace with the real value
-  project_name         = "entingestion"
-  division             = "TBD" # placeholder: replace with the real value
-}
-
-producer_ssm_prefix = "/entingestion/dev/producer"
-table_prefix        = "dev-"
+table_prefix = "dev-"
 
 # Built by services/ingestion/scripts/build_lambda.sh (relative to terraform/stacks/ingestion).
 lambda_core_zip = "../../../services/ingestion/dist/core.zip"
@@ -40,7 +29,8 @@ dispatcher_max_concurrency      = 2
 # Admission control: 8 live runs, 2 backfill runs at a time (defaults).
 
 # AWS Backup and cross-region copies are prod-only (not on the free plan).
-backup_enabled = false
+backup_enabled     = false
+backup_copy_region = null
 
 # Textract needs a paid account plan; this account is on the free plan. The OCR path is deployed
 # but switched off: scanned PDFs are SKIPPED, PDFs over 50 MB fail E_TOO_LARGE.
@@ -57,23 +47,30 @@ workload_boundary_enabled = false
 # wait on the ingest queue (queue age shows the backlog).
 live_slots = 3
 
-# Embedding models (docs/ARCHITECTURE.md "Embedding models", RUNBOOK "Add a model"). The default
-# is the two Titan v2 tables (primary live, compact), as before profiles. To add a model,
-# add a profile here, apply (make deploy: migrate creates chunks_<name>), then reindex/switch.
-# embedding_profiles = {
-#   primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-#   compact  = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
-#   # Cohere Embed Multilingual v3 on Bedrock (enable model access first). 512-token input limit:
-#   # Validate fails chunks above it, so chunk smaller (or use parent-child chunking) first.
-#   multilingual = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
-#   # Later: any OpenAI-compatible endpoint, e.g. a LiteLLM proxy (reachable from the internet:
-#   # Embed runs outside the VPC). The API key lives in Secrets Manager under that name.
-#   # litellm_768 = { provider = "openai_compatible", model = "nomic-embed-text", dimension = 768,
-#   #                 base_url = "https://litellm.example.com/v1", api_key_secret = "entingestion/dev/litellm" }
-# }
-# default_profile = "primary"
+# Embedding models (docs/ARCHITECTURE.md "Embedding models", RUNBOOK "Add a model"): one pgvector
+# table each, chunks_<name>. The stack has no default model: these are the only place models are
+# named. To add a model, add a profile here, apply (make deploy: migrate creates chunks_<name>),
+# then reindex/switch. Never change a profile's model or dimension once its table has data.
+embedding_profiles = {
+  primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+  compact = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
+  # Cohere Embed Multilingual v3 on Bedrock (enable model access first). 512-token input limit:
+  # Validate fails chunks above it, so chunk smaller (or use parent-child chunking) first.
+  # multilingual = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
+  # Any OpenAI-compatible endpoint, e.g. a LiteLLM proxy (reachable from the internet: Embed runs
+  # outside the VPC). The API key lives in Secrets Manager under that name.
+  # litellm_768 = { provider = "openai_compatible", model = "nomic-embed-text", dimension = 768,
+  #                 base_url = "https://litellm.example.com/v1", api_key_secret = "entingestion/dev/litellm" }
+}
+default_profile = "primary" # chunks_primary is live for tenants without their own registry
+
+# Bedrock reranking model for POST /v1/search with rerank (only used when rerank_enabled).
+rerank_model_id = "amazon.rerank-v1:0"
 
 # A tenant's first table (its own registry), for new tenants. To try per-tenant routing, map a
 # test tenant to the 512-d table and give a producer source that tenant (producer.tfvars
 # source_access, e.g. "tenant-test" = { tenant_id = "t-small", writers = [...] }):
 tenant_profiles = { "t-small" = "compact" } # test tenant on the 512-d model (source tenant-test)
+
+# The rebuild test (UC10) empties a vector table through migrate; prod keeps it off.
+allow_truncate = true

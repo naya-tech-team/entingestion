@@ -103,6 +103,11 @@ output "reconciler_function_name" {
   value       = module.fn["reconciler"].function_name
 }
 
+output "ssm_parameter_names" {
+  description = "SSM parameters published for other stacks (the ui stack)."
+  value       = { for k, p in aws_ssm_parameter.published : k => p.name }
+}
+
 output "eval_function_name" {
   description = "Retrieval evaluation (golden set: staging _eval/golden/LATEST; reports: _eval/<table>/)."
   value       = module.fn["eval"].function_name

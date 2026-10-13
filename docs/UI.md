@@ -90,9 +90,7 @@ The producer stack reads the UI origin for its raw bucket's CORS, and the ui sta
 
 ```bash
 aws login --profile entingestion
-services/producer/scripts/build_lambda.sh
-services/ingestion/scripts/build_lambda.sh all
-services/ui/bff/scripts/build_lambda.sh                     # -> services/ui/bff/dist/bff_lambda.zip
+make -C terraform build                                     # every Lambda zip, the BFF's included
 make -C terraform deploy ENV=dev STACK=producer             # 1. publishes the API URL; CORS: localhost only
 make -C terraform deploy ENV=dev STACK=ingestion            # 2. publishes the control API URL
 make -C terraform deploy ENV=dev STACK=ui                   # 3. CloudFront, BFF; publishes ui/origin
@@ -115,11 +113,11 @@ A new CloudFront distribution takes a few minutes to deploy. Until `ui-password`
 | `make -C terraform ui-password ENV=<env>` | Prompts for a username and password (not echoed) and stores `sha256("Basic " + base64(user:password))` in the KeyValueStore. Use it to rotate too: it takes effect at every edge within seconds, with no apply. Browsers prompt again once their cached login fails |
 | `make -C terraform ui-deploy ENV=<env>` | `npm ci` and `npm run build`, then uploads `dist/` to the site bucket and invalidates `/index.html`. Hashed files under `assets/` are cached for a year (`immutable`); `index.html` and the other files are `no-cache`, so a new build shows on the next load |
 | `make -C terraform ui-url ENV=<env>` | Prints `https://<id>.cloudfront.net` |
-| `make -C terraform ui-dev ENV=<env>` | Runs Vite on `http://localhost:5173`, proxying `/api` to that environment's CloudFront with basic auth from `UI_USER` and `UI_PASSWORD`. The dev raw bucket's CORS also allows `http://localhost:5173` (`ui_extra_origins`) |
+| `make -C terraform ui-dev ENV=<env>` | Runs Vite on `http://localhost:$UI_DEV_PORT` (default 5173), proxying `/api` to that environment's CloudFront with basic auth from `UI_USER` and `UI_PASSWORD`. The dev raw bucket's CORS allows `http://localhost:5173` (`ui_extra_origins` in `envs/dev/producer.tfvars`): with another `UI_DEV_PORT`, add that origin there and apply the producer, or uploads fail CORS |
 
 ```bash
 export UI_USER=ops UI_PASSWORD='…'       # the login set with ui-password
-make -C terraform ui-dev ENV=dev
+make -C terraform ui-dev ENV=dev         # UI_DEV_PORT=<port> for another port (see above)
 ```
 
 A BFF code change is a normal stack deploy: run `services/ui/bff/scripts/build_lambda.sh`, then `make deploy ENV=<env> STACK=ui`. It rolls back with `make rollback ENV=<env> FN=ui-<env>-bff VERSION=<n>`.
@@ -141,9 +139,19 @@ A BFF code change is a normal stack deploy: run `services/ui/bff/scripts/build_l
 
 ```bash
 cd services/ui/bff
-UI_URL=$(make -sC ../../../terraform ui-url ENV=dev) UI_USER=… UI_PASSWORD='…' \
-  AWS_REGION=us-west-2 uv run python scripts/ui_acceptance.py
+UI_ENV=dev UI_USER=… UI_PASSWORD='…' uv run python scripts/ui_acceptance.py
 ```
+
+Its settings come from the environment, else from the Terraform outputs of the `UI_ENV` workspace (`stacks/<stack>/.terraform/<env>`, which a `make deploy` or `make init ENV=<env> STACK=<stack>` from this checkout sets up):
+
+| Variable | Else |
+|---|---|
+| `UI_USER`, `UI_PASSWORD` | required: the login set with `ui-password` |
+| `UI_URL` | the ui stack's output `url` |
+| `UI_BFF_FUNCTION` | the ui stack's output `bff_function_name` |
+| `PRODUCER_API_URL` | the producer stack's output `api_url` |
+| `UI_SOURCE` | `acceptance`: the source the batch writes; the BFF's role must be one of its writers |
+| `AWS_REGION` | needed only when `PRODUCER_API_URL` carries no region (a custom domain); the region is otherwise taken from the URL |
 
 ## Limits
 

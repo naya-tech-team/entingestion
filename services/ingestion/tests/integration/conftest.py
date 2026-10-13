@@ -38,19 +38,23 @@ def pg_url() -> Iterator[str]:
 
 @pytest.fixture
 def pg(pg_url: str) -> Iterator[object]:
-    """A fresh database per test, with every migration applied."""
+    """A fresh database per test, prepared as the migrate function does: every migration, the
+    test profiles' tables (chunks_primary, chunks_compact), chunks_active on chunks_primary."""
     import uuid
 
     import psycopg
 
-    from ingest.vectorstore.migrations import apply
+    from ingest.embedding.profiles import parse
+    from ingest.migrate import prepare
+    from tests.conftest import PROFILE_ENV
 
     name = f"t_{uuid.uuid4().hex[:12]}"
     with psycopg.connect(pg_url, autocommit=True) as admin:
         admin.execute(f'CREATE DATABASE "{name}"')
     url = pg_url.rsplit("/", 1)[0] + f"/{name}"
     with psycopg.connect(url) as conn:
-        apply(conn, MIGRATIONS)
+        config = parse(PROFILE_ENV)
+        prepare(conn, MIGRATIONS, config.profiles.values(), config.profiles[config.default].table)
         yield conn
     with psycopg.connect(pg_url, autocommit=True) as admin:
         admin.execute(f'DROP DATABASE "{name}" WITH (FORCE)')

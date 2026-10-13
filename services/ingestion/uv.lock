@@ -374,6 +374,25 @@ wheels = [
 ]
 
 [[package]]
+name = "entingestion-common"
+version = "0.1.0"
+source = { editable = "../common" }
+dependencies = [
+    { name = "botocore" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "botocore", specifier = ">=1.35" }]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "botocore-stubs", specifier = ">=1.35" },
+    { name = "mypy", specifier = ">=1.13" },
+    { name = "pytest", specifier = ">=8.3" },
+    { name = "ruff", specifier = ">=0.8" },
+]
+
+[[package]]
 name = "ftfy"
 version = "6.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -418,6 +437,7 @@ dependencies = [
     { name = "aws-lambda-powertools", extra = ["tracer"] },
     { name = "boto3" },
     { name = "botocore" },
+    { name = "entingestion-common" },
     { name = "pydantic" },
     { name = "python-ulid" },
 ]
@@ -452,6 +472,7 @@ requires-dist = [
     { name = "aws-lambda-powertools", extras = ["tracer"], specifier = ">=3.0,<4" },
     { name = "boto3", specifier = ">=1.35" },
     { name = "botocore", specifier = ">=1.35" },
+    { name = "entingestion-common", editable = "../common" },
     { name = "ftfy", marker = "extra == 'docs'", specifier = ">=6.2,<7" },
     { name = "mammoth", marker = "extra == 'docs'", specifier = ">=1.8,<2" },
     { name = "pdfplumber", marker = "extra == 'docs'", specifier = ">=0.11,<1" },

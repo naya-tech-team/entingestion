@@ -1,4 +1,4 @@
-# Plan-time assertions for the ingestion stack (brief §8, §12, §16 TF).
+# Plan-time assertions for the ingestion stack.
 mock_provider "aws" {
   override_during = plan
 
@@ -116,9 +116,17 @@ variables {
     project_name         = "test"
     division             = "test"
   }
-  producer_ssm_prefix = "/entingestion/dev/producer"
-  lambda_core_zip     = "tests/fixtures/core.zip"
-  lambda_docs_zip     = "tests/fixtures/docs.zip"
+  lambda_core_zip    = "tests/fixtures/core.zip"
+  lambda_docs_zip    = "tests/fixtures/docs.zip"
+  backup_copy_region = null
+
+  # What envs/<env>/ingestion.tfvars set (the variables have no defaults).
+  embedding_profiles = {
+    primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
+    compact = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
+  }
+  default_profile = "primary"
+  rerank_model_id = "amazon.rerank-v1:0"
 }
 
 run "pipe_filters_the_articles_stream" {
@@ -130,7 +138,7 @@ run "pipe_filters_the_articles_stream" {
       && module.pipe.settings.starting_position == "LATEST"
       && module.pipe.settings.max_retries == 5
     )
-    error_message = "Pipe must use the two §4.1 filters, start at LATEST and retry 5 times before its DLQ."
+    error_message = "Pipe must use the two filters (STAGED rows, REMOVEs), start at LATEST and retry 5 times before its DLQ."
   }
 
   assert {
@@ -152,7 +160,7 @@ run "status_table_has_the_four_sparse_gsis" {
       && module.status_table.settings.ttl_attribute == "expires_at_epoch"
       && module.status_table.settings.range_key == "sk"
     )
-    error_message = "ingestion_status must have pk/sk, the four GSIs of §6.2 and TTL."
+    error_message = "ingestion_status must have pk/sk, the four sparse GSIs and TTL."
   }
 }
 
@@ -223,6 +231,24 @@ run "no_wildcard_resources_in_function_policies" {
     ])
     error_message = "Index may only connect to the proxy as ingest_writer."
   }
+
+  assert {
+    condition = anytrue([
+      for s in data.aws_iam_policy_document.migrate.statement :
+      s.sid == "RegistryRead" && toset(s.actions) == toset(["dynamodb:GetItem"])
+      && length(s.resources) == 1
+      && anytrue([for c in s.condition : c.variable == "dynamodb:LeadingKeys" && toset(c.values) == toset(["#CONFIG"])])
+    ])
+    error_message = "migrate may only GetItem the status table's #CONFIG items (the vector-table registry)."
+  }
+
+  assert {
+    condition = length([
+      for s in data.aws_iam_policy_document.migrate.statement : s
+      if length(setintersection(s.actions, ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:Query", "dynamodb:Scan", "dynamodb:*"])) > 0
+    ]) == 0
+    error_message = "migrate never writes, queries or scans DynamoDB."
+  }
 }
 
 run "database_uses_end_to_end_iam" {
@@ -255,7 +281,7 @@ run "workflow_wires_every_step" {
       for state in ["AfterFetch", "AfterExtract", "OcrStart", "OcrWait", "OcrPoll", "OcrDone", "OcrCollect"] :
       contains(module.ingest_workflow.settings.definition_states, state)
     ])
-    error_message = "Scanned and large PDFs must have the OCR branch (brief §4.4, UC12)."
+    error_message = "Scanned and large PDFs must have the OCR branch (UC12)."
   }
 
   assert {
@@ -285,9 +311,8 @@ run "prod_is_protected" {
   command = plan
 
   variables {
-    env                 = "prod"
-    producer_ssm_prefix = "/entingestion/prod/producer"
-    alarm_emails        = ["oncall@example.com"]
+    env          = "prod"
+    alarm_emails = ["oncall@example.com"]
   }
 
   assert {
@@ -362,15 +387,15 @@ run "operations_functions_are_wired" {
       module.reconcile_schedule.settings.schedule_expression == "rate(1 hour)"
       && module.reconcile_schedule.settings.state == "ENABLED"
     )
-    error_message = "The reconciler runs hourly (brief §11)."
+    error_message = "The reconciler runs hourly."
   }
 
   assert {
     condition = alltrue([
       for s in data.aws_iam_policy_document.reconciler.statement :
-      s.sid != "ProducerUpdatedIndex" || (tolist(s.actions) == tolist(["dynamodb:Query"]) && alltrue([for r in s.resources : endswith(r, "/index/gsi_updated") || endswith(r, "/index/gsi_updated_shard")]))
+      s.sid != "ProducerUpdatedIndex" || (tolist(s.actions) == tolist(["dynamodb:Query"]) && s.resources == toset(["arn:aws:dynamodb:us-west-2:123456789012:table/producer/index/gsi_updated_shard"]))
     ])
-    error_message = "The reconciler may only query the producer's gsi_updated and gsi_updated_shard indexes."
+    error_message = "The reconciler may only query the producer's gsi_updated_shard index."
   }
 
   assert {
@@ -499,7 +524,7 @@ run "reranking_can_be_switched_on" {
   }
 }
 
-run "alarms_cover_brief_section_12" {
+run "alarms_cover_the_pipeline_and_the_database" {
   command = plan
 
   assert {
@@ -619,7 +644,7 @@ run "reindex_workflow_is_wired" {
       module.reindex_workflow.settings.definition_start == "Plan"
       && contains(module.reindex_workflow.settings.definition_states, "Enqueue")
     )
-    error_message = "Reindex plans the articles, then queues them with a Distributed Map (brief §7.3)."
+    error_message = "Reindex plans the articles, then queues them with a Distributed Map."
   }
 
   assert {
@@ -661,7 +686,7 @@ run "quality_and_drift_are_wired" {
       module.drift_schedule.settings.schedule_expression == "rate(7 days)"
       && module.drift_schedule.settings.target_arn == module.fn["reconciler"].alias_arn
     )
-    error_message = "The drift check runs weekly through the reconciler (brief §11.6)."
+    error_message = "The drift check runs weekly through the reconciler."
   }
 
   assert {
@@ -689,7 +714,7 @@ run "operate_alarms_and_dashboard" {
       module.alerts.settings["step-${s}-slow"].extended_statistic == "p95"
       && module.alerts.settings["step-${s}-slow"].datapoints_to_alarm == 3
     ])
-    error_message = "Every step needs a p95 duration alarm over 3 of 3 periods (brief §12)."
+    error_message = "Every step needs a p95 duration alarm over 3 of 3 periods."
   }
 
   assert {
@@ -727,12 +752,23 @@ run "every_resource_gets_the_mandatory_tags" {
   command = plan
 
   assert {
-    condition = (
-      local.mandatory_tags["Name"] == "ingestion-dev"
-      && local.mandatory_tags["Internal Client Code"] == "test"
-      && length(local.mandatory_tags) == 8
-    )
-    error_message = "The provider tags every resource with the 8 mandatory tags; Name falls back to the stack."
+    condition = module.common.default_tags == {
+      "Name"                 = "ingestion-dev"
+      "Created By"           = "test"
+      "Created Date"         = "2026-01-01"
+      "Owner"                = "test"
+      "Internal Client Code" = "test"
+      "Client"               = "test"
+      "Project Name"         = "test"
+      "Division"             = "test"
+      "env"                  = "dev"
+    }
+    error_message = "The provider tags every resource with the 8 mandatory tags (Name falls back to the stack) and env."
+  }
+
+  assert {
+    condition     = local.permissions_boundary == "arn:aws:iam::123456789012:policy/entingestion-dev-workload-boundary" && module.boundary_check.all_bounded
+    error_message = "The workload boundary ARN is unchanged and every role carries it."
   }
 }
 
@@ -868,16 +904,15 @@ run "table_operations_run_as_ingest_ops" {
     condition = anytrue([
       for s in data.aws_iam_policy_document.control_api.statement :
       s.sid == "TableOperations" && s.resources == toset([
-        "arn:aws:lambda:us-west-2:123456789012:function:ingestion-dev-tables",
         "arn:aws:lambda:us-west-2:123456789012:function:ingestion-dev-tables:live",
       ])
     ])
-    error_message = "The control API invokes the tables function, never migrate (master credentials)."
+    error_message = "The control API invokes the tables function's live alias, never migrate (master credentials)."
   }
 
   assert {
-    condition     = module.fn["migrate"].settings.environment.ALLOW_TRUNCATE == "true"
-    error_message = "Truncate stays available outside prod by default."
+    condition     = module.fn["migrate"].settings.environment.ALLOW_TRUNCATE == "false"
+    error_message = "Truncate is off unless an environment's tfvars turns it on (dev does)."
   }
 }
 
@@ -886,7 +921,6 @@ run "prod_refuses_truncate_and_runs_two_aurora_instances" {
 
   variables {
     env                   = "prod"
-    producer_ssm_prefix   = "/entingestion/prod/producer"
     alarm_emails          = ["oncall@example.com"]
     allow_truncate        = false
     aurora_instance_count = 2
@@ -953,9 +987,8 @@ run "prod_refuses_to_plan_without_an_alert_subscriber" {
   command = plan
 
   variables {
-    env                 = "prod"
-    producer_ssm_prefix = "/entingestion/prod/producer"
-    alarm_emails        = []
+    env          = "prod"
+    alarm_emails = []
   }
 
   expect_failures = [var.alarm_emails]
@@ -1110,10 +1143,10 @@ run "backups_are_prod_only_and_copied_to_another_region" {
   command = plan
 
   variables {
-    env                 = "prod"
-    producer_ssm_prefix = "/entingestion/prod/producer"
-    alarm_emails        = ["oncall@example.com"]
-    backup_enabled      = true
+    env                = "prod"
+    alarm_emails       = ["oncall@example.com"]
+    backup_enabled     = true
+    backup_copy_region = "us-east-2"
   }
 
   assert {
@@ -1143,7 +1176,7 @@ run "no_backups_by_default" {
 
 # -- embedding profiles -----------------------------------------------------------------
 
-run "default_embedding_profiles_reproduce_the_original_tables" {
+run "embedding_profiles_reach_every_function" {
   command = plan
 
   assert {
@@ -1155,7 +1188,7 @@ run "default_embedding_profiles_reproduce_the_original_tables" {
       && module.fn["embed"].settings.environment.DEFAULT_PROFILE == "primary"
       && module.fn["embed"].settings.environment.TENANT_PROFILES == "{}"
     )
-    error_message = "By default the profiles are the two Titan tables, chunks_primary live (numbers and booleans as JSON)."
+    error_message = "The profiles reach the functions with their defaults filled in (numbers and booleans as JSON), chunks_primary live."
   }
 
   assert {
@@ -1299,4 +1332,184 @@ run "embedding_profiles_must_fit_the_lambda_environment" {
     default_profile = "profile_0"
   }
   expect_failures = [var.embedding_profiles]
+}
+
+run "backups_need_a_copy_region" {
+  command = plan
+
+  variables {
+    env                = "prod"
+    alarm_emails       = ["oncall@example.com"]
+    backup_enabled     = true
+    backup_copy_region = null
+  }
+
+  expect_failures = [var.backup_copy_region]
+}
+
+run "a_profile_without_bedrock_has_no_throttle_alarm" {
+  command = plan
+
+  variables {
+    embedding_profiles = {
+      lite_768 = { provider = "openai_compatible", model = "nomic-embed-text", dimension = 768, base_url = "https://litellm.example.com/v1", api_key_secret = "entingestion/dev/litellm" }
+    }
+    default_profile = "lite_768"
+  }
+
+  assert {
+    condition     = !contains(keys(module.alerts.settings), "bedrock-throttled")
+    error_message = "Without a Bedrock profile there is no Bedrock throttling alarm (and no model to watch)."
+  }
+
+  assert {
+    condition     = local.eval_tables == ["chunks_lite_768"]
+    error_message = "The dashboard's quality panel shows one table per profile."
+  }
+}
+
+run "the_throttle_alarm_falls_back_to_a_bedrock_profile" {
+  command = plan
+
+  variables {
+    embedding_profiles = {
+      lite_768     = { provider = "openai_compatible", model = "nomic-embed-text", dimension = 768, base_url = "https://litellm.example.com/v1", api_key_secret = "entingestion/dev/litellm" }
+      multilingual = { provider = "bedrock", model = "cohere.embed-multilingual-v3", dimension = 1024, max_input_tokens = 512, batch_size = 96 }
+    }
+    default_profile = "lite_768"
+  }
+
+  assert {
+    condition     = module.alerts.settings["bedrock-throttled"].dimensions.ModelId == "cohere.embed-multilingual-v3"
+    error_message = "When the default profile isn't on Bedrock, the alarm watches the first Bedrock profile's model."
+  }
+
+  assert {
+    condition     = toset(local.eval_tables) == toset(["chunks_lite_768", "chunks_multilingual"])
+    error_message = "The dashboard's quality panel shows one table per profile."
+  }
+}
+
+run "models_come_from_tfvars" {
+  command = plan
+
+  variables {
+    rerank_enabled  = true
+    rerank_model_id = "cohere.rerank-v3-5:0"
+  }
+
+  assert {
+    condition = anytrue([
+      for s in data.aws_iam_policy_document.control_api.statement :
+      s.sid == "RerankModel" && s.resources == toset(["arn:aws:bedrock:us-west-2::foundation-model/cohere.rerank-v3-5:0"])
+    ])
+    error_message = "The reranking model is whatever rerank_model_id names."
+  }
+
+  assert {
+    condition     = local.eval_tables == ["chunks_compact", "chunks_primary"]
+    error_message = "The dashboard's quality panel shows chunks_<profile> for every profile."
+  }
+}
+
+run "callers_get_only_the_live_aliases" {
+  command = plan
+
+  assert {
+    condition = (
+      local.query_invoke_arns == ["arn:aws:lambda:us-west-2:123456789012:function:ingestion-dev-query:live"]
+      && local.tables_invoke_arns == ["arn:aws:lambda:us-west-2:123456789012:function:ingestion-dev-tables:live"]
+      && module.fn["eval"].settings.environment.QUERY_FUNCTION_NAME == "ingestion-dev-query:live"
+      && module.fn["reconciler"].settings.environment.QUERY_FUNCTION_NAME == "ingestion-dev-query:live"
+      && module.fn["control_api"].settings.environment.TABLES_FUNCTION_NAME == "ingestion-dev-tables:live"
+    )
+    error_message = "Every caller of query and tables names the live alias, and may invoke only it."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in data.aws_iam_policy_document.eval.statement :
+      s.sid == "GoldenSet" && s.resources == toset(["arn:aws:s3:::ingest-staging/_eval/golden/*"])
+    ])
+    error_message = "The eval function reads the versioned golden sets only."
+  }
+}
+
+run "the_dispatcher_waits_for_a_slot_within_its_timeout" {
+  command = plan
+
+  assert {
+    condition = (
+      module.fn["dispatcher"].settings.environment.SLOT_WAIT_SECONDS == "40"
+      && module.fn["dispatcher"].settings.timeout == 60
+      && module.ingest_queue.settings.visibility_timeout_seconds == 360
+      && module.backfill_queue.settings.visibility_timeout_seconds == 360
+    )
+    error_message = "The dispatcher waits up to slot_wait_seconds (40) inside its 60 s timeout; the queues' visibility is 6 x the timeout."
+  }
+}
+
+run "the_dispatcher_timeout_is_configurable" {
+  command = plan
+
+  variables {
+    dispatcher_timeout = 120
+    slot_wait_seconds  = 90
+  }
+
+  assert {
+    condition = (
+      module.fn["dispatcher"].settings.timeout == 120
+      && module.fn["dispatcher"].settings.environment.SLOT_WAIT_SECONDS == "90"
+      && module.ingest_queue.settings.visibility_timeout_seconds == 720
+    )
+    error_message = "dispatcher_timeout and slot_wait_seconds reach the function and the queues."
+  }
+}
+
+run "the_slot_wait_must_fit_the_dispatcher_timeout" {
+  command = plan
+
+  variables {
+    slot_wait_seconds = 60
+  }
+
+  expect_failures = [var.slot_wait_seconds]
+}
+
+run "the_producer_hand_off_follows_the_environment" {
+  command = plan
+
+  variables {
+    env           = "prod"
+    alarm_emails  = ["oncall@example.com"]
+    database_mode = "aurora"
+  }
+
+  assert {
+    condition = (
+      local.producer_ssm_prefix == "/entingestion/prod/producer"
+      && data.aws_ssm_parameter.producer["articles_stream_arn"].name == "/entingestion/prod/producer/articles_stream_arn"
+      && module.fn["control_api"].settings.environment.SOURCE_ACCESS_PARAMETER == "/entingestion/prod/producer/source_access"
+    )
+    error_message = "The producer's hand-off is read from <ssm_prefix>/<env>/producer."
+  }
+
+  assert {
+    condition     = output.ssm_parameter_names == { control_api_url = "/entingestion/prod/ingestion/control_api_url", control_api_execution_arn = "/entingestion/prod/ingestion/control_api_execution_arn" }
+    error_message = "ssm_parameter_names lists what the stack publishes for the ui stack."
+  }
+}
+
+run "the_producer_hand_off_can_be_overridden" {
+  command = plan
+
+  variables {
+    producer_ssm_prefix = "/shared/dev/producer"
+  }
+
+  assert {
+    condition     = module.fn["control_api"].settings.environment.SOURCE_ACCESS_PARAMETER == "/shared/dev/producer/source_access"
+    error_message = "producer_ssm_prefix overrides the derived prefix."
+  }
 }

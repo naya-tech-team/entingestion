@@ -1,25 +1,22 @@
 """Embedding profiles: which model embeds into which vector table (docs/ARCHITECTURE.md
 "Embedding models").
 
-A profile is a name plus how to call its model. Its table is chunks_<name>, so the default
-profiles reproduce the tables that existed before profiles:
-
-    primary   bedrock  amazon.titan-embed-text-v2:0  1024  -> chunks_primary
-    compact    bedrock  amazon.titan-embed-text-v2:0   512  -> chunks_compact
-
-Configured by Terraform (variable embedding_profiles) as JSON in the environment:
+A profile is a name plus how to call its model; its table is chunks_<name>. Configured by
+Terraform (variables embedding_profiles, default_profile, tenant_profiles) as JSON in the
+environment; there are no built-in profiles:
 
     EMBEDDING_PROFILES  {"<name>": {"provider": "bedrock" | "openai_compatible", "model": ...,
                          "dimension": ..., "normalize": true, "base_url": ...,
                          "api_key_secret": ..., "document_input_type": ...,
                          "query_input_type": ..., "send_dimensions": false, "batch_size": 16,
                          "max_input_tokens": 8192}, ...}
-    DEFAULT_PROFILE     the default registry's table when it has no item yet
+                        (required)
+    DEFAULT_PROFILE     the default registry's table when it has no item yet (required)
     TENANT_PROFILES     {"<tenant>": "<profile>"}: a tenant's first table
-                        (ingest.vectorstore.registry)
+                        (ingest.vectorstore.registry); optional
 
-Without EMBEDDING_PROFILES (functions deployed before profiles) the two default profiles apply,
-and TARGET_TABLE / EMBEDDING_MODEL_ID / EMBEDDING_DIMENSION still pick the default one.
+What stays in code is each model family's protocol: how a model id maps to its request format,
+the dimensions it accepts and its input types.
 
 Providers:
     bedrock            InvokeModel; the request format follows the model family (model id prefix):
@@ -56,9 +53,6 @@ TITAN_DIMENSIONS = frozenset({256, 512, 1024})
 COHERE_V3_DIMENSIONS = frozenset({1024})
 COHERE_V4_DIMENSIONS = frozenset({256, 512, 1024, 1536})
 _FAMILY_MAX_TOKENS = {TITAN_V2: 8192, COHERE_V4: 128_000, COHERE: 512}
-
-DEFAULT_PROFILE = "primary"
-TITAN_MODEL = "amazon.titan-embed-text-v2:0"
 
 
 class ProfileError(ValueError):
@@ -222,18 +216,6 @@ def _profile(name: str, raw: Mapping[str, Any]) -> EmbeddingProfile:
     return profile
 
 
-def builtin_profiles() -> dict[str, EmbeddingProfile]:
-    """The profiles before configuration existed (and Terraform's default)."""
-    return {
-        p.name: p
-        for p in (
-            EmbeddingProfile(DEFAULT_PROFILE, "bedrock", TITAN_MODEL, 1024),
-            # Same model, 512 dimensions: smaller and cheaper to search (migration 002).
-            EmbeddingProfile("compact", "bedrock", TITAN_MODEL, 512),
-        )
-    }
-
-
 @dataclass(frozen=True)
 class ProfileConfig:
     profiles: Mapping[str, EmbeddingProfile]
@@ -242,16 +224,27 @@ class ProfileConfig:
 
 
 def parse(env: Mapping[str, str]) -> ProfileConfig:
-    """Profiles, the default profile and the tenant mapping from the environment."""
+    """Profiles, the default profile and the tenant mapping from the environment. Raises
+    ProfileError when EMBEDDING_PROFILES or DEFAULT_PROFILE is missing or invalid."""
     raw = env.get("EMBEDDING_PROFILES", "").strip()
-    if raw:
+    if not raw:
+        raise ProfileError(
+            "EMBEDDING_PROFILES is not set: the embedding profiles are configuration"
+            " (Terraform variable embedding_profiles)"
+        )
+    try:
         data = json.loads(raw)
-        if not isinstance(data, dict) or not data:
-            raise ProfileError("EMBEDDING_PROFILES must be a non-empty JSON object")
-        profiles = {name: _profile(name, cfg) for name, cfg in data.items()}
-    else:
-        profiles = builtin_profiles()
-    default = env.get("DEFAULT_PROFILE", "").strip() or _legacy_default(env, profiles)
+    except json.JSONDecodeError as err:
+        raise ProfileError(f"EMBEDDING_PROFILES isn't JSON: {err}") from None
+    if not isinstance(data, dict) or not data:
+        raise ProfileError("EMBEDDING_PROFILES must be a non-empty JSON object")
+    profiles = {name: _profile(name, cfg) for name, cfg in data.items()}
+    default = env.get("DEFAULT_PROFILE", "").strip()
+    if not default:
+        raise ProfileError(
+            "DEFAULT_PROFILE is not set: name the default registry's profile"
+            " (Terraform variable default_profile)"
+        )
     if default not in profiles:
         raise ProfileError(f"DEFAULT_PROFILE {default!r} isn't a profile: {sorted(profiles)}")
     tenants = json.loads(env.get("TENANT_PROFILES", "").strip() or "{}")
@@ -261,22 +254,3 @@ def parse(env: Mapping[str, str]) -> ProfileConfig:
     if unknown:
         raise ProfileError(f"TENANT_PROFILES names unknown profiles: {unknown}")
     return ProfileConfig(profiles, default, {str(t): str(p) for t, p in tenants.items()})
-
-
-def _legacy_default(env: Mapping[str, str], profiles: dict[str, EmbeddingProfile]) -> str:
-    """The default profile of an environment from before profiles: TARGET_TABLE names it; a
-    table with no profile becomes one from EMBEDDING_MODEL_ID / EMBEDDING_DIMENSION."""
-    table = env.get("TARGET_TABLE", "").strip()
-    if not table:
-        return DEFAULT_PROFILE
-    name = table.removeprefix("chunks_")
-    if name not in profiles:
-        profiles[name] = _profile(
-            name,
-            {
-                "provider": "bedrock",
-                "model": env.get("EMBEDDING_MODEL_ID") or TITAN_MODEL,
-                "dimension": env.get("EMBEDDING_DIMENSION") or 1024,
-            },
-        )
-    return name

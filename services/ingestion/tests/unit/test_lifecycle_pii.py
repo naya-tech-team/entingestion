@@ -187,11 +187,3 @@ def test_large_texts_are_batched_and_offsets_mapped_back(monkeypatch: pytest.Mon
         ["c@d.ee"],
     ]
     assert pii.redact(texts[1], found.spans[1]) == "short [EMAIL] text"
-
-
-def test_an_unknown_policy_value_blocks() -> None:
-    policy = access.AccessPolicy.from_json(
-        json.dumps({"sources": {"s": {"tenant_id": "t", "pii": "maybe"}}})
-    )
-    assert policy.pii_for("s") == "block"
-    assert policy.pii_for("other") == "allow"

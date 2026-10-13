@@ -5,6 +5,9 @@ mock_provider "aws" {
   mock_data "aws_partition" {
     defaults = { partition = "aws" }
   }
+  mock_data "aws_region" {
+    defaults = { region = "us-west-2" }
+  }
   mock_data "aws_iam_policy_document" {
     defaults = { json = "{}" }
   }
@@ -43,6 +46,55 @@ run "extra_statements_are_appended" {
   assert {
     condition     = length(data.aws_iam_policy_document.key.statement) == 2
     error_message = "Expected the root statement plus one extra statement."
+  }
+}
+
+run "no_service_statements_by_default" {
+  command = plan
+
+  assert {
+    condition     = output.statement_sids == ["AccountRootFullAccess"]
+    error_message = "Without the flags the key policy has only the account statement."
+  }
+}
+
+run "cloudwatch_statements_come_first_and_are_scoped" {
+  command = plan
+
+  variables {
+    allow_cloudwatch_logs         = true
+    allow_cloudwatch_alarms_topic = true
+    policy_statements = [{
+      sid        = "Extra"
+      actions    = ["kms:Decrypt"]
+      principals = [{ type = "Service", identifiers = ["example.amazonaws.com"] }]
+    }]
+  }
+
+  assert {
+    condition     = output.statement_sids == ["AccountRootFullAccess", "CloudWatchLogsEncryption", "CloudWatchAlarmsToEncryptedTopic", "Extra"]
+    error_message = "The CloudWatch statements follow the account statement, before policy_statements."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in data.aws_iam_policy_document.key.statement :
+      s.sid == "CloudWatchLogsEncryption"
+      && anytrue([for p in s.principals : p.identifiers == toset(["logs.us-west-2.amazonaws.com"])])
+      && anytrue([for c in s.condition : c.test == "ArnLike" && c.variable == "kms:EncryptionContext:aws:logs:arn" && c.values == tolist(["arn:aws:logs:us-west-2:123456789012:log-group:*"])])
+    ])
+    error_message = "CloudWatch Logs may use the key only for this account's log groups in this region."
+  }
+
+  assert {
+    condition = anytrue([
+      for s in data.aws_iam_policy_document.key.statement :
+      s.sid == "CloudWatchAlarmsToEncryptedTopic"
+      && s.actions == toset(["kms:Decrypt", "kms:GenerateDataKey*"])
+      && anytrue([for p in s.principals : p.identifiers == toset(["cloudwatch.amazonaws.com"])])
+      && anytrue([for c in s.condition : c.test == "StringEquals" && c.variable == "aws:SourceAccount" && c.values == tolist(["123456789012"])])
+    ])
+    error_message = "CloudWatch alarms may use the key only for this account."
   }
 }
 

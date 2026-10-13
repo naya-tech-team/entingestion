@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import subprocess
 import sys
@@ -29,10 +30,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from _tf import ROOT, default_env
 from acceptance import Env
-from gate_phase1 import ROOT
 
-SOURCE = "acceptance"
+SOURCE = os.environ.get("ACCEPTANCE_SOURCE", "acceptance")
 TERMINAL = {"INDEXED", "SKIPPED", "SKIPPED_UNCHANGED", "FAILED_PERMANENT", "FAILED_RETRYABLE"}
 POLL_S = 10
 
@@ -70,7 +71,7 @@ def percentile(values: list[float], p: float) -> float:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--env", default="dev")
+    parser.add_argument("--env", default=default_env())
     parser.add_argument("--docs", type=int, default=10)
     parser.add_argument("--words", type=int, default=400)
     parser.add_argument("--timeout", type=int, default=1800, help="seconds to wait for indexing")

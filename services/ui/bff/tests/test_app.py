@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from tests.conftest import UI_HEADERS, FakeApi, Invoke, closed_port_url
+from tests.conftest import REGION, UI_HEADERS, FakeApi, Invoke, SetEnv, closed_port_url
 
 PID = "prc_01J9ZK3Q8V6Y2B7N4M5X0W1T2R"
 AID = "art_0123456789abcdef0123456789abcdef"
@@ -216,7 +216,7 @@ def test_requests_are_sigv4_signed_for_execute_api(invoke: Invoke, producer: Fak
     headers = producer.last.headers
     today = datetime.now(UTC).strftime("%Y%m%d")
     assert headers["authorization"].startswith(
-        f"AWS4-HMAC-SHA256 Credential=AKIDTESTING/{today}/us-west-2/execute-api/aws4_request"
+        f"AWS4-HMAC-SHA256 Credential=AKIDTESTING/{today}/{REGION}/execute-api/aws4_request"
     )
     signed = re.search(r"SignedHeaders=([^,]+)", headers["authorization"])
     assert signed is not None
@@ -242,13 +242,6 @@ def test_viewer_credentials_and_headers_are_not_forwarded(
     assert headers["authorization"].startswith("AWS4-HMAC-SHA256 ")
     assert "cookie" not in headers
     assert "x-forwarded-for" not in headers
-
-
-def test_region_comes_from_the_execute_api_host() -> None:
-    from bff.upstream import region_of
-
-    assert region_of("https://abc.execute-api.eu-west-1.amazonaws.com/prod") == "eu-west-1"
-    assert region_of("http://127.0.0.1:1/prod") == "us-west-2"  # AWS_REGION
 
 
 # -- Bodies, query strings, idempotency --------------------------------------------------------
@@ -350,17 +343,17 @@ def test_throttling_keeps_retry_after(invoke: Invoke, control: FakeApi) -> None:
     assert response["headers"]["Retry-After"] == "2"
 
 
-def test_connection_error_is_502(invoke: Invoke, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CONTROL_API_URL", closed_port_url())
+def test_connection_error_is_502(invoke: Invoke, setenv: SetEnv) -> None:
+    setenv(CONTROL_API_URL=closed_port_url())
     response = invoke("GET", f"/api/articles/{AID}/status")
 
     assert response["statusCode"] == 502
     assert _body(response) == {"message": "upstream unavailable"}
 
 
-def test_timeout_is_502(invoke: Invoke, producer: FakeApi, monkeypatch: pytest.MonkeyPatch) -> None:
-    from bff import upstream
-
+def test_timeout_is_502(
+    invoke: Invoke, producer: FakeApi, monkeypatch: pytest.MonkeyPatch, setenv: SetEnv
+) -> None:
     original = producer.server.RequestHandlerClass.do_GET  # type: ignore[attr-defined]
 
     def slow(self: Any) -> None:
@@ -368,18 +361,41 @@ def test_timeout_is_502(invoke: Invoke, producer: FakeApi, monkeypatch: pytest.M
         original(self)
 
     monkeypatch.setattr(producer.server.RequestHandlerClass, "do_GET", slow)
-    monkeypatch.setattr(upstream, "READ_TIMEOUT", 0.1)
+    setenv(READ_TIMEOUT="0.1")
     response = invoke("GET", "/api/sources")
 
     assert response["statusCode"] == 502
 
 
-def test_missing_configuration_is_a_500(invoke: Invoke, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PRODUCER_API_URL")
-    response = invoke("GET", "/api/sources")
+@pytest.mark.parametrize("name", ["PRODUCER_API_URL", "CONTROL_API_URL"])
+def test_missing_configuration_fails_the_first_invocation(
+    invoke: Invoke, producer: FakeApi, setenv: SetEnv, name: str
+) -> None:
+    """Both URLs are needed at cold start, even by a route that only uses the other API."""
+    from bff.config import MissingSetting
 
-    assert response["statusCode"] == 500
-    assert _body(response) == {"message": "internal server error"}
+    setenv(**{name: None})
+
+    with pytest.raises(MissingSetting, match=name):
+        invoke("GET", "/api/sources")
+    assert producer.requests == []
+
+
+def test_limits_and_timeouts_come_from_the_environment(
+    invoke: Invoke, control: FakeApi, setenv: SetEnv
+) -> None:
+    setenv(MAX_RERUN_IDS="2", MAX_REDRIVE="5")
+
+    rerun = invoke(
+        "POST", "/api/ops/ingest", headers=UI_HEADERS, body='{"article_ids":["a","b","c"]}'
+    )
+    redrive = invoke("POST", "/api/ops/dlq/redrive", headers=UI_HEADERS, body='{"max":6}')
+
+    assert rerun["statusCode"] == 422
+    assert _body(rerun)["errors"][0]["msg"] == "at most 2 article ids from the UI"
+    assert redrive["statusCode"] == 422
+    assert _body(redrive)["errors"][0]["msg"] == "an integer of at most 5 from the UI"
+    assert control.requests == []
 
 
 def test_bodies_are_not_logged(
@@ -408,7 +424,7 @@ def test_ops_requests_are_signed(invoke: Invoke, control: FakeApi) -> None:
         assert request.headers["authorization"].startswith(
             "AWS4-HMAC-SHA256 Credential=AKIDTESTING/"
         )
-        assert "/us-west-2/execute-api/aws4_request" in request.headers["authorization"]
+        assert f"/{REGION}/execute-api/aws4_request" in request.headers["authorization"]
         assert request.headers["x-amz-security-token"] == "session-token"
 
 

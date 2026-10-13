@@ -1,4 +1,4 @@
-"""Text normalization (brief §4.4 step 4). Deterministic for (input, pipeline_version): no
+"""Text normalization (the Normalize step). Deterministic for (input, pipeline_version): no
 lowercasing, stemming or stopword removal."""
 
 from __future__ import annotations

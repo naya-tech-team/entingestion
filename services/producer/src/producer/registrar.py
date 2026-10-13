@@ -1,4 +1,4 @@
-"""SQS (S3 ObjectCreated) -> registrar Lambda handler (brief §6.2)."""
+"""SQS (S3 ObjectCreated) -> registrar Lambda handler."""
 
 from __future__ import annotations
 

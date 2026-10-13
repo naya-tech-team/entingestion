@@ -1,6 +1,6 @@
-# The bucket and kms_key_id are named after the account (entingestion-tfstate-<account>-<region>,
-# alias/entingestion-tfstate); the Makefile passes them from AWS_ACCOUNT_ID (docs/AWS_ACCESS.md).
+# The bucket, kms_key_id and region come from the environment: the Makefile passes them from
+# AWS_ACCOUNT_ID and STATE_REGION (default AWS_REGION): entingestion-tfstate-<account>-<region>,
+# alias/entingestion-tfstate (terraform/bootstrap, docs/AWS_ACCESS.md).
 key          = "prod/ui/terraform.tfstate"
-region       = "us-west-2"
 encrypt      = true
 use_lockfile = true

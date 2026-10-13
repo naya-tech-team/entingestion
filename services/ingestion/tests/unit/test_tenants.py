@@ -270,13 +270,13 @@ def test_drift_checks_each_article_against_its_registry(
     assert counts.get("requeued_drift_orphan", 0) == 0
 
 
-def test_legacy_status_items_fall_back_to_the_producers_tenant(mapped: Env) -> None:
+def test_a_status_item_without_a_tenant_belongs_to_the_default_registry(mapped: Env) -> None:
     from ingest.tenancy import Tenancy
 
     run(message_from(produce("art_s", PAGE, tenant_id="t-small")))
     item = latest("art_s")
-    del item["tenant_id"]  # indexed before LATEST recorded the tenant
+    del item["tenant_id"]
     tenancy = Tenancy(store())
-    assert tenancy.tenants([item]) == {"art_s": "t-small"}
-    assert tenancy.governed([item], "t-small") == [item]
-    assert tenancy.governed([item], None) == []
+    assert tenancy.tenants([item]) == {"art_s": None}
+    assert tenancy.governed([item], "t-small") == []
+    assert tenancy.governed([item], None) == [item]

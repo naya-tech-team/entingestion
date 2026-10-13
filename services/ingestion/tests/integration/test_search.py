@@ -1,4 +1,4 @@
-"""Hybrid search (query function, migration 006) against a real pgvector database, as
+"""Hybrid search (query function) against a real pgvector database, as
 ingest_reader: one tenant per call, vector + keyword candidates fused by reciprocal rank."""
 
 from __future__ import annotations

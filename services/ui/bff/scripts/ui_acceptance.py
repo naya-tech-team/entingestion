@@ -1,8 +1,17 @@
 """End-to-end check of the deployed upload UI (docs/UI.md), with 3 small sample files.
 
     cd services/ui/bff
-    UI_URL=https://dxxxx.cloudfront.net UI_USER=... UI_PASSWORD=... \
-    AWS_REGION=us-west-2 uv run python scripts/ui_acceptance.py
+    UI_ENV=dev UI_USER=... UI_PASSWORD=... uv run python scripts/ui_acceptance.py
+
+Environment (each name/URL falls back to the Terraform output of the UI_ENV workspace):
+    UI_USER, UI_PASSWORD  the basic-auth credentials (required)
+    UI_ENV                the Terraform workspace (.terraform/<env>), for the fallbacks below
+    UI_URL                the UI's URL, else `terraform output -raw url` (stack ui)
+    UI_BFF_FUNCTION       the BFF function, else `terraform output -raw bff_function_name` (ui)
+    PRODUCER_API_URL      the producer API, else `terraform output -raw api_url` (producer)
+    UI_SOURCE             the source the batch writes (default: acceptance); the BFF's role
+                          must be one of its writers
+    AWS_REGION            only if PRODUCER_API_URL carries no region (a custom domain)
 
 It drives the UI's own path (CloudFront -> BFF -> APIs, plus the browser's presigned PUT):
 the login gate, the direct-origin denials, the security headers, the CSRF guard and route
@@ -18,16 +27,19 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
 from typing import Any
 
 import botocore.session
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
+from entcommon.sigv4 import signed_headers
+
+STACKS = Path(__file__).resolve().parents[4] / "terraform" / "stacks"
 
 SOURCE = os.environ.get("UI_SOURCE", "acceptance")
 SAMPLES = {
@@ -93,23 +105,36 @@ def _json(raw: bytes) -> Any:
         return raw.decode(errors="replace")
 
 
-def ssm(name: str) -> str:
-    client = botocore.session.get_session().create_client("ssm")
-    return str(client.get_parameter(Name=name)["Parameter"]["Value"])
+def setting(variable: str, stack: str, output: str) -> str:
+    """The environment variable, else the stack's Terraform output in the UI_ENV workspace."""
+    value = os.environ.get(variable)
+    if value:
+        return value
+    env = os.environ.get("UI_ENV")
+    if not env:
+        sys.exit(f"set {variable}, or UI_ENV to read terraform output {output} ({stack})")
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        ["terraform", "output", "-raw", output],  # noqa: S607 - terraform from PATH
+        cwd=STACKS / stack,
+        env={**os.environ, "TF_DATA_DIR": f".terraform/{env}"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        sys.exit(f"terraform output {output} ({stack}, {env}) failed: {result.stderr.strip()}")
+    return result.stdout.strip()
 
 
 def signed_delete(url: str) -> int:
-    session = botocore.session.get_session()
-    creds = session.get_credentials()
+    """DELETE signed with your AWS credentials (the region comes from the execute-api URL)."""
+    creds = botocore.session.get_session().get_credentials()
     assert creds is not None, "no AWS credentials for the cleanup"
-    region = session.get_config_variable("region") or os.environ["AWS_REGION"]
-    request = AWSRequest(method="DELETE", url=url, headers={"host": url.split("/")[2]})
-    SigV4Auth(creds.get_frozen_credentials(), "execute-api", region).add_auth(request)
-    status, _, _ = http("DELETE", url, headers=dict(request.headers.items()))
+    status, _, _ = http("DELETE", url, headers=signed_headers("DELETE", url, None, creds))
     return status
 
 
-def gate(ui: Ui, env: str) -> None:
+def gate(ui: Ui) -> None:
     status, _, _ = http("GET", ui.base + "/")
     check(status == 401, f"no credentials -> 401 (got {status})")
     wrong = base64.b64encode(b"nobody:wrong").decode()
@@ -120,8 +145,9 @@ def gate(ui: Ui, env: str) -> None:
     )
     check(status == 401, f"wrong credentials on /api -> 401 (got {status})")
 
-    lam = botocore.session.get_session().create_client("lambda")
-    fn_url = lam.get_function_url_config(FunctionName=f"ui-{env}-bff", Qualifier="live")
+    lam: Any = botocore.session.get_session().create_client("lambda")
+    function = setting("UI_BFF_FUNCTION", "ui", "bff_function_name")
+    fn_url = lam.get_function_url_config(FunctionName=function, Qualifier="live")
     status, _, _ = http("GET", fn_url["FunctionUrl"].rstrip("/") + "/api/sources")
     check(status == 403, f"direct function URL -> 403 (got {status})")
 
@@ -316,22 +342,21 @@ def _latest_run(detail: Any) -> str | None:
     return str(runs[0].get("run_id")) if runs else None
 
 
-def cleanup(env: str, articles: list[str]) -> None:
-    api = ssm(f"/entingestion/{env}/producer/api_url")
+def cleanup(articles: list[str]) -> None:
+    api = setting("PRODUCER_API_URL", "producer", "api_url").rstrip("/")
     for aid in articles:
         status = signed_delete(f"{api}/v1/articles/{aid}")
         check(status == 204, f"cleanup delete {aid} -> 204 (got {status})")
 
 
 def main() -> int:
-    env = os.environ.get("UI_ENV", "dev")
-    ui = Ui(os.environ["UI_URL"], os.environ["UI_USER"], os.environ["UI_PASSWORD"])
-    gate(ui, env)
+    ui = Ui(setting("UI_URL", "ui", "url"), os.environ["UI_USER"], os.environ["UI_PASSWORD"])
+    gate(ui)
     guards(ui)
     pid, articles = batch(ui)
     if pid is not None:
         operations(ui, pid, articles)
-    cleanup(env, articles)
+    cleanup(articles)
     print(f"\n{len(failures)} failure(s)")
     return 1 if failures else 0
 

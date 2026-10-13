@@ -10,7 +10,7 @@ Two REST APIs, both regional API Gateway with `AWS_IAM` auth (SigV4, service `ex
 ```bash
 make -sC terraform output ENV=dev STACK=producer  | grep api_url
 make -sC terraform output ENV=dev STACK=ingestion | grep control_api_url
-uvx awscurl --service execute-api --region us-west-2 "$API/v1/tables"     # any SigV4 client works
+uvx awscurl --service execute-api --region "$AWS_REGION" "$API/v1/tables"     # the stacks' region; any SigV4 client works
 ```
 
 **Errors.** Both APIs return JSON errors:
@@ -45,17 +45,18 @@ Returns `201` with a Process:
 
 ```json
 {"process_id": "prc_01M4…", "name": "Batch 1", "source": "news", "status": "OPEN",
- "expected_count": null, "registered_count": 0, "rejected_count": 0, "settled": false,
+ "expected_count": null, "registered_count": 0, "rejected_count": 0, "superseded_count": 0,
+ "expired_count": 0, "tickets_issued": 0, "pending_uploads": 0, "settled": false,
  "metadata": {}, "created_by": "arn:aws:iam::…", "created_at": "…", "updated_at": "…", "closed_at": null}
 ```
 
 ### `GET /v1/processes/{process_id}`
 
-Returns `200` with the Process. `settled` is true when the status is CLOSED, no upload is still pending (each is registered, rejected, superseded or expired), and at least `expected_count` upload tickets were issued. Processes created before uploads were counted (`tickets_issued` null) settle when `registered_count + rejected_count >= expected_count`.
+Returns `200` with the Process. `settled` is true when the status is CLOSED, `pending_uploads` is 0 (every upload is registered, rejected, superseded or expired), and `tickets_issued >= expected_count`. Every process is created with both counters at 0.
 
 ### `POST /v1/processes/{process_id}/close`
 
-The body is `{"expected_count"?: int}`. It defaults to the current `registered_count`. Returns `200` with the Process (CLOSED), or `409` if it's not OPEN.
+The body is `{"expected_count"?: int}`. It defaults to the upload tickets issued so far (`tickets_issued`). Returns `200` with the Process (CLOSED), or `409` if it's not OPEN.
 
 ### `POST /v1/processes/{process_id}/uploads`: get an upload ticket
 
@@ -73,7 +74,7 @@ Returns `201` with an UploadTicket:
 
 ```json
 {"upload_id": "upl_01M4…", "article_id": "art_143e…", "process_id": "prc_01M4…", "method": "PUT",
- "url": "https://<raw bucket>.s3.us-west-2.amazonaws.com/raw/art_…/upl_…/a.pdf?X-Amz-…",
+ "url": "https://<raw bucket>.s3.<region>.amazonaws.com/raw/art_…/upl_…/a.pdf?X-Amz-…",
  "headers": {"Content-Type": "application/pdf", "x-amz-checksum-sha256": "<base64>", "x-amz-meta-upload-id": "upl_…"},
  "expires_at": "…"}
 ```
@@ -134,7 +135,7 @@ Returns `200`, or `404` if ingestion has no status for the article yet.
             "execution_arn": "…", "started_at": "…", "ended_at": "…"}],
   "steps": [{"step": "FETCH", "step_status": "SUCCEEDED", "attempt": 1, "duration_ms": 71,
              "metrics": {"bytes": 1955, "kind": "text/markdown"}}, …],
-  "execution": "https://us-west-2.console.aws.amazon.com/states/home?…"
+  "execution": "https://<region>.console.aws.amazon.com/states/home?…"
 }
 ```
 
@@ -208,6 +209,8 @@ What's in flight or failed, and the queue depths:
                               "model": "amazon.titan-embed-text-v2:0", "dimension": 1024}, …}}
 ```
 
+`profiles` lists the configured embedding profiles (`embedding_profiles` in the tfvars; the models above are dev's).
+
 `registry` is the default registry, or with `?tenant_id=` the one that governs that tenant (its own, else the default). `consistent`: for the default registry, `chunks_active` serves its live table; for a tenant's, its live table exists. `tenants` lists every tenant with its own registry (stored, or from `tenant_profiles`). A table whose profile's table doesn't exist yet shows `null` under `tables`.
 
 ### `POST /v1/ingest`: re-run articles
@@ -267,7 +270,7 @@ Retires `table` from the (tenant's) registry: live runs stop writing it; its row
 | `query` | string (1-2000) | The question or keywords |
 | `k` | int 1-50 | Results (default 10) |
 | `filters` | object? | `{"source"?: string, "published_after"?: "YYYY-MM-DD", "process_id"?: string}` |
-| `rerank` | bool | Rerank with Bedrock (`amazon.rerank-v1:0`) when the stack has `rerank_enabled`; ignored otherwise |
+| `rerank` | bool | Rerank with the Bedrock model `rerank_model_id` (tfvars) when the stack has `rerank_enabled`; ignored otherwise |
 
 The query is embedded with the tenant's live table's embedding profile (the tenant's own registry, else the default one; `table` in the response) and searched in that table; vector and keyword candidates (headings weigh more than text) are fused by reciprocal rank. Returns `200`:
 

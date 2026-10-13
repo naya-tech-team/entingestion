@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router";
-import { api, ApiError, AuthError, query, seg } from "../api";
+import { api, AuthError, query, seg } from "../api";
 import { ConfirmAction } from "../components/ConfirmAction";
-import { ErrorBanner, Loading, Stat, StatusBadge, useInterval } from "../components/common";
+import { ErrorBanner, Loading, Stat, StatusBadge } from "../components/common";
 import { formatBytes, formatTime, shortPrincipal } from "../format";
+import { isNotFound } from "../hooks/request";
+import { useLoader } from "../hooks/useApi";
 import { RERUN_WATCH_MS } from "../ops";
 import { POLL_MS, processFinished, processProgress } from "../status";
 import type { ActionResponse, ArticleRow, Process, ProcessArticles, ProcessSummary, UploadPage, UploadRow } from "../types";
@@ -26,70 +28,64 @@ async function allUploads(id: string, signal: AbortSignal): Promise<UploadRow[]>
   return rows;
 }
 
-function notFound(err: unknown): boolean {
-  return err instanceof ApiError && err.status === 404;
+interface ProcessView {
+  process: Process | null;
+  summary: ProcessSummary | null;
+  uploads: UploadRow[] | null;
+  articles: ArticleRow[] | null;
+  errors: unknown[];
+  authLost: boolean;
+}
+
+/**
+ * The page's four reads, in parallel. A part that fails keeps its last value and adds its
+ * error; ingestion has no summary until the first article arrives, so its 404 is not an error.
+ * An expired session reports only the 401.
+ */
+async function loadProcess(id: string, signal: AbortSignal, prev: ProcessView | null): Promise<ProcessView> {
+  const [p, s, u, a] = await Promise.allSettled([
+    api.get<Process>(`/api/processes/${seg(id)}`, signal),
+    api.get<ProcessSummary>(`/api/processes/${seg(id)}/summary`, signal),
+    allUploads(id, signal),
+    api.get<ProcessArticles>(`/api/processes/${seg(id)}/articles`, signal),
+  ]);
+  const errs: unknown[] = [];
+  const keep = <T,>(r: PromiseSettledResult<T>, last: T | null, tolerate404 = false): T | null => {
+    if (r.status === "fulfilled") return r.value;
+    if (!(tolerate404 && isNotFound(r.reason))) errs.push(r.reason);
+    return last;
+  };
+  const process = keep(p, prev?.process ?? null);
+  const summary = keep(s, prev?.summary ?? null, true);
+  const uploads = keep(u, prev?.uploads ?? null);
+  const articlesPage = keep(a, null);
+  const articles = articlesPage ? articlesPage.items : (prev?.articles ?? null);
+  const auth = errs.find((e) => e instanceof AuthError);
+  return { process, summary, uploads, articles, errors: auth ? [auth] : errs, authLost: Boolean(auth) };
+}
+
+function processMissingIn(view: ProcessView | null): boolean {
+  return Boolean(view && view.errors.some(isNotFound) && !view.process);
 }
 
 export function ProcessPage() {
   const { id = "" } = useParams();
-  const [process, setProcess] = useState<Process | null>(null);
-  const [summary, setSummary] = useState<ProcessSummary | null>(null);
-  const [uploads, setUploads] = useState<UploadRow[] | null>(null);
-  const [articles, setArticles] = useState<ArticleRow[] | null>(null);
-  const [errors, setErrors] = useState<unknown[]>([]);
-  const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [authLost, setAuthLost] = useState(false);
-  const inFlight = useRef<AbortController | null>(null);
-
-  const load = useCallback(async () => {
-    if (inFlight.current) return; // the previous refresh is still running
-    const ctrl = new AbortController();
-    inFlight.current = ctrl;
-    setLoading(true);
-    const [p, s, u, a] = await Promise.allSettled([
-      api.get<Process>(`/api/processes/${seg(id)}`, ctrl.signal),
-      api.get<ProcessSummary>(`/api/processes/${seg(id)}/summary`, ctrl.signal),
-      allUploads(id, ctrl.signal),
-      api.get<ProcessArticles>(`/api/processes/${seg(id)}/articles`, ctrl.signal),
-    ]);
-    if (ctrl.signal.aborted) return;
-    const errs: unknown[] = [];
-    if (p.status === "fulfilled") setProcess(p.value);
-    else errs.push(p.reason);
-    // Ingestion has no summary until the first article arrives: not an error.
-    if (s.status === "fulfilled") setSummary(s.value);
-    else if (!notFound(s.reason)) errs.push(s.reason);
-    if (u.status === "fulfilled") setUploads(u.value);
-    else errs.push(u.reason);
-    if (a.status === "fulfilled") setArticles(a.value.items);
-    else errs.push(a.reason);
-    const auth = errs.find((e) => e instanceof AuthError);
-    setAuthLost(Boolean(auth));
-    setErrors(auth ? [auth] : errs);
-    setUpdatedAt(new Date());
-    setLoading(false);
-    inFlight.current = null;
-  }, [id]);
-
-  useEffect(() => {
-    setProcess(null);
-    setSummary(null);
-    setUploads(null);
-    setArticles(null);
-    setErrors([]);
-    void load();
-    return () => {
-      inFlight.current?.abort();
-      inFlight.current = null;
-    };
-  }, [load]);
-
   const [watchUntil, setWatchUntil] = useState(0);
-  // After a re-run, keep polling a while: the summary turns IN_PROGRESS once a run claims an article.
+  // Poll until ingestion is complete and the producer has settled, the session expired or the
+  // process doesn't exist. After a re-run, keep polling a while: the summary turns IN_PROGRESS
+  // once a run claims an article.
+  const { data, loading, updatedAt, reload } = useLoader<ProcessView>(id, (signal, prev) => loadProcess(id, signal, prev), {
+    refreshMs: POLL_MS,
+    stopWhen: (v) => (processFinished(v.summary, v.process) && watchUntil <= Date.now()) || v.authLost || processMissingIn(v),
+  });
+  const process = data?.process ?? null;
+  const summary = data?.summary ?? null;
+  const uploads = data?.uploads ?? null;
+  const articles = data?.articles ?? null;
+  const errors = data?.errors ?? [];
+  const authLost = data?.authLost ?? false;
   const finished = processFinished(summary, process) && watchUntil <= Date.now();
-  const processMissing = errors.some(notFound) && !process;
-  useInterval(() => void load(), finished || authLost || processMissing ? null : POLL_MS);
+  const processMissing = processMissingIn(data);
 
   const filenames = useMemo(() => {
     const byArticle = new Map<string, string>();
@@ -127,7 +123,7 @@ export function ProcessPage() {
             {finished ? "Finished" : authLost ? "Paused" : "Auto-refresh every 5 s"}
             {updatedAt && ` · updated ${updatedAt.toLocaleTimeString()}`}
           </span>
-          <button type="button" onClick={() => void load()} disabled={loading}>
+          <button type="button" onClick={reload} disabled={loading}>
             Refresh
           </button>
         </div>
@@ -164,8 +160,8 @@ export function ProcessPage() {
                 <Stat label="Status" value={<StatusBadge status={process.status} />} />
                 <Stat label="Settled" value={process.settled ? "yes" : "no"} />
                 <Stat label="Expected" value={process.expected_count ?? "-"} />
-                <Stat label="Tickets issued" value={process.tickets_issued ?? "-"} />
-                <Stat label="Pending" value={process.pending_uploads ?? "-"} />
+                <Stat label="Tickets issued" value={process.tickets_issued} />
+                <Stat label="Pending" value={process.pending_uploads} />
                 <Stat label="Registered" value={process.registered_count} />
                 <Stat label="Rejected" value={process.rejected_count} />
                 <Stat label="Superseded" value={process.superseded_count ?? 0} />
@@ -209,7 +205,7 @@ export function ProcessPage() {
                         }
                         onDone={() => {
                           setWatchUntil(Date.now() + RERUN_WATCH_MS);
-                          void load();
+                          reload();
                         }}
                       />
                     </div>

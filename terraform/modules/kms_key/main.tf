@@ -1,14 +1,44 @@
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
+data "aws_region" "current" {}
 
 locals {
-  account_root = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root"
+  account_id   = data.aws_caller_identity.current.account_id
+  partition    = data.aws_partition.current.partition
+  region       = data.aws_region.current.region
+  account_root = "arn:${local.partition}:iam::${local.account_id}:root"
   split_admin  = length(var.admin_principals) > 0
   admin_actions = [
     "kms:Create*", "kms:Describe*", "kms:Enable*", "kms:List*", "kms:Put*", "kms:Update*",
     "kms:Revoke*", "kms:Disable*", "kms:Get*", "kms:Delete*", "kms:TagResource",
     "kms:UntagResource", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion",
   ]
+
+  # Service principals that act without an IAM role, before the caller's own statements.
+  service_statements = concat(
+    var.allow_cloudwatch_logs ? [{
+      # CloudWatch Logs encrypts this account's log groups in this region with the key.
+      sid        = "CloudWatchLogsEncryption"
+      actions    = ["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
+      principals = [{ type = "Service", identifiers = ["logs.${local.region}.amazonaws.com"] }]
+      conditions = [{
+        test     = "ArnLike"
+        variable = "kms:EncryptionContext:aws:logs:arn"
+        values   = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:*"]
+      }]
+    }] : [],
+    var.allow_cloudwatch_alarms_topic ? [{
+      # CloudWatch alarms of this account publish to an SNS topic encrypted with the key.
+      sid        = "CloudWatchAlarmsToEncryptedTopic"
+      actions    = ["kms:Decrypt", "kms:GenerateDataKey*"]
+      principals = [{ type = "Service", identifiers = ["cloudwatch.amazonaws.com"] }]
+      conditions = [{
+        test     = "StringEquals"
+        variable = "aws:SourceAccount"
+        values   = [local.account_id]
+      }]
+    }] : [],
+  )
 }
 
 data "aws_iam_policy_document" "key" {
@@ -88,7 +118,7 @@ data "aws_iam_policy_document" "key" {
   }
 
   dynamic "statement" {
-    for_each = var.policy_statements
+    for_each = concat(local.service_statements, var.policy_statements)
 
     content {
       sid       = statement.value.sid

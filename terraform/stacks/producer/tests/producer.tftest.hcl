@@ -1,4 +1,4 @@
-# Plan-time assertions from brief §11 for the producer stack.
+# Plan-time assertions for the producer stack.
 # Guarantees the generic modules always enforce (bucket public access block and TLS-only policy,
 # table PITR) are asserted in each module's own tests under terraform/modules/*/tests.
 mock_provider "aws" {
@@ -99,6 +99,8 @@ variables {
     division             = "test"
   }
 
+  backup_copy_region = null
+
   # S3 artifact mode, so tests don't need a built zip.
   lambda_s3_bucket           = "artifacts"
   lambda_s3_key              = "producer/test.zip"
@@ -139,15 +141,14 @@ run "table_names_and_keys_match_the_contract" {
       && module.articles_table.settings.hash_key == "article_id"
       && module.uploads_table.settings.hash_key == "upload_id"
     )
-    error_message = "Partition keys must match brief §5."
+    error_message = "Partition keys are the contract with the ingestion pipeline."
   }
 
   assert {
     condition = (
-      contains([for g in module.articles_table.settings.global_secondary_index : "${g.name}:${g.hash_key}:${g.range_key}:${g.projection_type}"], "gsi_process:process_id:updated_at:ALL")
-      && contains([for g in module.articles_table.settings.global_secondary_index : "${g.name}:${g.hash_key}:${g.range_key}:${g.projection_type}"], "gsi_updated:updated_date:updated_at:INCLUDE")
+      [for g in module.articles_table.settings.global_secondary_index : "${g.name}:${g.hash_key}:${g.range_key}:${g.projection_type}"] == ["gsi_updated_shard:updated_shard:updated_at:INCLUDE"]
     )
-    error_message = "articles must have gsi_process (ALL) and gsi_updated (INCLUDE) per brief §5."
+    error_message = "articles has one index, gsi_updated_shard (INCLUDE), for the ingestion reconciler."
   }
 
   assert {
@@ -328,7 +329,7 @@ run "api_uses_iam_auth_on_both_methods" {
   }
 }
 
-run "api_function_matches_brief" {
+run "api_function_matches_the_contract" {
   command = plan
 
   assert {
@@ -350,7 +351,7 @@ run "api_function_matches_brief" {
       "MAX_FILE_BYTES", "UPLOAD_URL_TTL_SECONDS"] :
       contains(keys(module.api_function.settings.environment), k)
     ])
-    error_message = "api function is missing required environment variables (brief §7.3)."
+    error_message = "api function is missing required environment variables."
   }
 
   assert {
@@ -391,12 +392,12 @@ run "zip_mode_hashes_the_local_package" {
   }
 
   assert {
-    condition     = local.lambda_code.zip_path == "tests/fixtures/lambda.zip" && local.lambda_code.source_code_hash == filebase64sha256("tests/fixtures/lambda.zip")
+    condition     = module.lambda_artifact.code.zip_path == "tests/fixtures/lambda.zip" && module.lambda_artifact.code.source_code_hash == filebase64sha256("tests/fixtures/lambda.zip")
     error_message = "Zip mode must deploy the local zip with its filebase64sha256."
   }
 }
 
-run "registrar_wiring_matches_brief" {
+run "registrar_wiring_matches_the_contract" {
   command = plan
 
   assert {
@@ -505,7 +506,7 @@ run "bring_your_own_waf" {
   }
 }
 
-run "alarms_match_brief" {
+run "alarms_cover_the_upload_path" {
   command = plan
 
   assert {
@@ -676,6 +677,14 @@ run "uploads_settle_and_unused_objects_expire" {
   }
 
   assert {
+    condition = anytrue([
+      for g in module.uploads_table.settings.global_secondary_index :
+      g.name == "gsi_pending" && toset(g.non_key_attributes) == toset(["status", "s3_key", "process_id"])
+    ])
+    error_message = "gsi_pending projects what the janitor reads: status, s3_key and process_id."
+  }
+
+  assert {
     condition = (
       length([for r in module.raw_bucket.settings.lifecycle_rules : r if lookup(r.tags, "producer-unused", "") == "rejected"]) == 1
       && length([for r in module.raw_bucket.settings.lifecycle_rules : r if lookup(r.tags, "producer-unused", "") == "superseded"]) == 1
@@ -792,10 +801,11 @@ run "backups_are_prod_only_and_copied_to_another_region" {
   command = plan
 
   variables {
-    env            = "prod"
-    alarm_emails   = ["oncall@example.com"]
-    source_access  = { news = { tenant_id = "news", writers = ["arn:aws:iam::123456789012:role/news"] } }
-    backup_enabled = true
+    env                = "prod"
+    alarm_emails       = ["oncall@example.com"]
+    source_access      = { news = { tenant_id = "news", writers = ["arn:aws:iam::123456789012:role/news"] } }
+    backup_enabled     = true
+    backup_copy_region = "us-east-2"
   }
 
   assert {
@@ -819,5 +829,72 @@ run "no_backups_by_default" {
   assert {
     condition     = length(module.backup) == 0
     error_message = "AWS Backup is off unless backup_enabled (dev runs on the free plan)."
+  }
+}
+
+run "backups_need_a_copy_region" {
+  command = plan
+
+  variables {
+    env                = "prod"
+    alarm_emails       = ["oncall@example.com"]
+    source_access      = { news = { tenant_id = "news", writers = ["arn:aws:iam::123456789012:role/news"] } }
+    backup_enabled     = true
+    backup_copy_region = null
+  }
+
+  expect_failures = [var.backup_copy_region]
+}
+
+# -- shared derivations (modules/stack_common): unchanged by the module --------------------------
+
+run "default_tags_are_the_mandatory_tags_and_env" {
+  command = plan
+
+  variables {
+    tags = { cost_center = "42" }
+  }
+
+  assert {
+    condition = module.common.default_tags == {
+      "Name"                 = "producer-dev"
+      "Created By"           = "test"
+      "Created Date"         = "2026-01-01"
+      "Owner"                = "test"
+      "Internal Client Code" = "test"
+      "Client"               = "test"
+      "Project Name"         = "test"
+      "Division"             = "test"
+      "env"                  = "dev"
+      "cost_center"          = "42"
+    }
+    error_message = "The provider tags every resource with the extra tags, the 8 mandatory tags (Name = producer-<env>) and env."
+  }
+
+  assert {
+    condition     = local.name_prefix == "producer-dev" && module.api_function.function_name == "producer-dev-api"
+    error_message = "Names are producer-<env>-*."
+  }
+}
+
+run "boundary_and_access_policy_json_are_unchanged" {
+  command = plan
+
+  variables {
+    operator_principals = ["user/operator"]
+    admin_principals    = ["role/entingestion-dev-deploy"]
+    source_access = {
+      news = { tenant_id = "t-news", writers = ["role/news", "user/operator"], readers = ["arn:aws:iam::210987654321:role/search"], pii = "redact" }
+    }
+  }
+
+  assert {
+    condition     = local.permissions_boundary == "arn:aws:iam::123456789012:policy/entingestion-dev-workload-boundary" && module.boundary_check.all_bounded
+    error_message = "The workload boundary ARN is unchanged and every role carries it."
+  }
+
+  assert {
+    condition     = local.source_access_json == "{\"admins\":[\"arn:aws:iam::123456789012:role/entingestion-dev-deploy\"],\"sources\":{\"news\":{\"pii\":\"redact\",\"readers\":[\"arn:aws:iam::210987654321:role/search\"],\"tenant_id\":\"t-news\",\"writers\":[\"arn:aws:iam::123456789012:role/news\",\"arn:aws:iam::123456789012:user/operator\"]}}}"
+    error_message = "SOURCE_ACCESS (and its SSM copy) keeps its exact JSON."
   }
 }

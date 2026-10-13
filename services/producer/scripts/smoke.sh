@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-# Post-deploy smoke test (brief §11). Ingests tests/fixtures through the real API and S3, waits
-# for the registrar to settle the process, then checks the counts and one article per file.
+# Post-deploy smoke test. Ingests tests/fixtures through the real API and S3, waits for the
+# registrar to settle the process, then checks the counts and one article per file.
 #
-#   ENV=dev scripts/smoke.sh                 # API URL from the stack's Terraform output
+#   ENV=dev scripts/smoke.sh                 # API URL from the producer stack's Terraform output
 #   PRODUCER_API_URL=https://... scripts/smoke.sh
+#
+# Environment:
+#   PRODUCER_API_URL  the API's invoke URL; else `terraform output -raw api_url` of the producer
+#                     stack in the ENV workspace (ENV is then required)
+#   SOURCE            the source to write (default: smoke); your credentials must be its writer
+#   TIMEOUT_SECONDS   how long to wait for the process to settle (default: 180)
+#   AWS_REGION        only if the API URL carries no region (a custom domain)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-ENV="${ENV:-dev}"
+SOURCE="${SOURCE:-smoke}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-180}"
 
 if [[ -z "${PRODUCER_API_URL:-}" ]]; then
+  : "${ENV:?set ENV (the Terraform workspace) or PRODUCER_API_URL}"
   PRODUCER_API_URL=$(cd ../../terraform/stacks/producer && TF_DATA_DIR=".terraform/${ENV}" terraform output -raw api_url)
 fi
-export PRODUCER_API_URL TIMEOUT_SECONDS
+export PRODUCER_API_URL SOURCE TIMEOUT_SECONDS
 
 uv run python - <<'PY'
 import hashlib
@@ -33,7 +41,7 @@ expected = {f.relative_to(fixtures).as_posix(): hashlib.sha256(f.read_bytes()).h
 print(f"smoke: ingesting {len(files)} fixture file(s) via {os.environ['PRODUCER_API_URL']}")
 
 run = subprocess.run(
-    ["producer-cli", "ingest-dir", str(fixtures), "--name", "smoke test", "--source", "smoke", "--close"],
+    ["producer-cli", "ingest-dir", str(fixtures), "--name", "smoke test", "--source", os.environ["SOURCE"], "--close"],
     capture_output=True, text=True, check=False,
 )
 sys.stderr.write(run.stderr)

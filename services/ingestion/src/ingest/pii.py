@@ -1,4 +1,4 @@
-"""PII screening in Normalize (review M3.5), when PII_SCREENING is on (off by default: Comprehend
+"""PII screening in Normalize, when PII_SCREENING is on (off by default: Comprehend
 is paid and not on the AWS free plan).
 
 Amazon Comprehend DetectPiiEntities runs over the title and every block, packed into requests

@@ -1,11 +1,14 @@
-"""Business logic behind the API (brief §4, §6.1, §6.3, §6.4)."""
+"""Business logic behind the API: processes, upload tickets, articles and who may touch them."""
 
 from __future__ import annotations
 
+from collections.abc import Callable, Set
 from datetime import timedelta
 from typing import Any
 
-from producer.authz import AccessPolicy
+from entcommon.authz import AccessPolicy
+from entcommon.paging import TokenError, decode_token, encode_token
+
 from producer.config import Settings
 from producer.errors import (
     ConflictError,
@@ -39,18 +42,14 @@ from producer.models import (
     UploadTicket,
 )
 from producer.repository import (
+    MEMBER_PAGE_KEYS,
     PENDING,
-    InvalidPageToken,
+    SOURCE_PAGE_KEYS,
+    UPLOAD_PAGE_KEYS,
     Repository,
-    decode_page_token,
-    encode_page_token,
 )
 from producer.storage import Storage
 from producer.timeutil import date_of, iso, utcnow
-
-# Upload rows outlive their ticket by far, so an event redriven from the registrar DLQ (kept
-# 14 days) still finds its upload; the janitor settles tickets that were never used.
-UPLOAD_ROW_TTL = timedelta(days=15)
 
 
 def raw_key(prefix: str, article_id: str, upload_id: str, filename: str) -> str:
@@ -99,6 +98,8 @@ class ProducerService:
             "status": ProcessStatus.OPEN.value,
             "registered_count": 0,
             "rejected_count": 0,
+            "tickets_issued": 0,
+            "pending_uploads": 0,
             "metadata": req.metadata,
             "created_by": caller,
             "created_at": now,
@@ -125,8 +126,7 @@ class ProducerService:
         self._can_write(caller, row, f"process {process_id}")
         expected = req.expected_count
         if expected is None:
-            # Every upload requested so far (older processes: the articles registered so far).
-            expected = int(row.get("tickets_issued", row.get("registered_count", 0)))
+            expected = int(row.get("tickets_issued") or 0)  # every upload requested so far
         item = self.repo.close_process(process_id, expected, iso(utcnow()))
         if item is None:
             # A repeated close (a client retrying after a lost response) gets the same answer.
@@ -141,28 +141,17 @@ class ProducerService:
     def list_processes(self, query: ListProcessesQuery, caller: str) -> ProcessPage:
         if not self.access.can_read(caller, query.source):
             raise ForbiddenError(f"not allowed to read source {query.source!r}")
-        start_key = self._start_key(query.next_token)
-        if start_key is not None and start_key.get("source") != query.source:
-            raise RequestValidationError(
-                "Request validation failed",
-                [FieldError(("query", "next_token"), "next_token belongs to another source")],
-            )
+        start_key = _start_key(
+            query.next_token,
+            SOURCE_PAGE_KEYS,
+            lambda key: key["source"] == query.source,
+            "next_token belongs to another source",
+        )
         items, last_key = self.repo.list_processes_by_source(query.source, query.limit, start_key)
         return ProcessPage(
             items=[Process.model_validate(i) for i in items],
-            next_token=encode_page_token(last_key),
+            next_token=encode_token(last_key),
         )
-
-    @staticmethod
-    def _start_key(token: str | None) -> dict[str, Any] | None:
-        if not token:
-            return None
-        try:
-            return decode_page_token(token)
-        except InvalidPageToken as exc:
-            raise RequestValidationError(
-                "Request validation failed", [FieldError(("query", "next_token"), str(exc))]
-            ) from exc
 
     # -- uploads ------------------------------------------------------------
 
@@ -193,10 +182,9 @@ class ProducerService:
             "status": UploadStatus.PENDING.value,
             "requested_by": caller,
             "created_at": iso(now),
-            "expires_at_epoch": int((now + UPLOAD_ROW_TTL).timestamp()),
-            # Counted in the process until it has an outcome; listed by the janitor (gsi_pending)
-            # once the ticket has expired.
-            "counted": True,
+            "expires_at_epoch": int((now + self.settings.upload_row_ttl).timestamp()),
+            # Counted in the process's pending_uploads until it has an outcome; listed by the
+            # janitor (gsi_pending) once the ticket has expired.
             "pending": PENDING,
             "ticket_expires_epoch": int((now + timedelta(seconds=ttl)).timestamp()),
             "upload_seq": self.repo.next_upload_sequence(article_id),
@@ -245,16 +233,16 @@ class ProducerService:
     def list_uploads(self, process_id: str, query: ListUploadsQuery, caller: str) -> UploadPage:
         """Every upload of a process, oldest first, whatever its outcome."""
         self.get_process(process_id, caller)
-        start_key = self._start_key(query.next_token)
-        if start_key is not None and start_key.get("process_id") != process_id:
-            raise RequestValidationError(
-                "Request validation failed",
-                [FieldError(("query", "next_token"), "next_token belongs to another process")],
-            )
+        start_key = _start_key(
+            query.next_token,
+            UPLOAD_PAGE_KEYS,
+            lambda key: key["process_id"] == process_id,
+            "next_token belongs to another process",
+        )
         items, last_key = self.repo.list_uploads_by_process(process_id, query.limit, start_key)
         return UploadPage(
             items=[UploadSummary.model_validate(i) for i in items],
-            next_token=encode_page_token(last_key),
+            next_token=encode_token(last_key),
         )
 
     def get_upload(self, upload_id: str, caller: str) -> Upload:
@@ -279,24 +267,16 @@ class ProducerService:
 
     def list_articles(self, process_id: str, query: ListArticlesQuery, caller: str) -> ArticlePage:
         self.get_process(process_id, caller)
-        start_key = None
-        if query.next_token:
-            try:
-                start_key = decode_page_token(query.next_token)
-            except InvalidPageToken as exc:
-                raise RequestValidationError(
-                    "Request validation failed",
-                    [FieldError(("query", "next_token"), str(exc))],
-                ) from exc
-            if start_key.get("member_process_id") != process_id:
-                raise RequestValidationError(
-                    "Request validation failed",
-                    [FieldError(("query", "next_token"), "next_token belongs to another process")],
-                )
+        start_key = _start_key(
+            query.next_token,
+            MEMBER_PAGE_KEYS,
+            lambda key: key["member_process_id"] == process_id,
+            "next_token belongs to another process",
+        )
         items, last_key = self.repo.list_articles_by_process(process_id, query.limit, start_key)
         return ArticlePage(
             items=[Article.model_validate(i) for i in items],
-            next_token=encode_page_token(last_key),
+            next_token=encode_token(last_key),
         )
 
     def patch_article(
@@ -328,3 +308,23 @@ class ProducerService:
             raise ConflictError(f"article {article_id} changed meanwhile; try again")
         if purge:
             self.storage.purge(f"{self.settings.raw_prefix}{article_id}/")
+
+
+def _start_key(
+    token: str | None,
+    keys: Set[str],
+    belongs: Callable[[dict[str, Any]], bool],
+    mismatch: str,
+) -> dict[str, Any] | None:
+    """The ExclusiveStartKey in a listing's next_token: the listing's exact key shape, and bound
+    to the query it came from. Anything else is a 422 on query.next_token."""
+    if not token:
+        return None
+    try:
+        return decode_token(
+            token, expect_keys=keys, require_keys=keys, check=belongs, mismatch=mismatch
+        )
+    except TokenError as exc:
+        raise RequestValidationError(
+            "Request validation failed", [FieldError(("query", "next_token"), str(exc))]
+        ) from exc

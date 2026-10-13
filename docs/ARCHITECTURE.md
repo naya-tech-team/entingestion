@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes what the system is made of, the data it keeps, the guarantees it gives, and why it is built this way. For the step-by-step behaviour see [WORKFLOWS.md](WORKFLOWS.md). The design briefs are [`claude.md`](../claude.md) (producer) and [`INGESTION_HANDOFF_PROMPT.md`](../INGESTION_HANDOFF_PROMPT.md) (ingestion).
+This document describes what the system is made of, the data it keeps, the guarantees it gives, and why it is built this way. For the step-by-step behaviour see [WORKFLOWS.md](WORKFLOWS.md); for configuration (environment variables, tfvars), [RUNBOOK.md](RUNBOOK.md#configuration).
 
 ![System overview](diagrams/png/01-overview.png)
 
@@ -50,8 +50,8 @@ The browser PUTs files straight to the raw bucket with each upload ticket's pres
 | extract | docs | 2 GB / 900 s | – | HTML (trafilatura), PDF (pdfplumber), DOCX (mammoth), TXT/MD |
 | normalize | docs | 1 GB / 300 s | – | Cleans text into ordered blocks with headings and pages |
 | chunk | docs | 1 GB / 300 s | – | ~512-token chunks with 64-token overlap (tiktoken cl100k_base) |
-| embed | core | 1 GB / 900 s | – | Embedding cache, then Bedrock Titan v2 for misses |
-| validate | core | 1 GB / 300 s | – | The gate: counts, unique ids, dimensions, finite unit vectors, sizes → `_manifest.json` |
+| embed | core | 1 GB / 900 s | – | Embedding cache, then the target profile's model for misses |
+| validate | core | 1 GB / 300 s | – | The gate: counts, unique ids, dimensions, finite unit vectors, sizes → `_manifest.<table>.json` |
 | index | core | 1 GB / 300 s | ✓ | Transactional version swap in pgvector; delete path |
 | finalize | core | 256 MB / 60 s | – | INDEXED, lease release, process roll-up, `article.indexed` event |
 | mark_failed | core | 256 MB / 60 s | – | Classifies the error, records it, alerts on permanent failures |
@@ -114,8 +114,8 @@ Other ingestion resources:
 | 2a | OCR (Start → Wait/Poll → Collect) | raw object via Textract | `extracted/content.json` | EXTRACTING |
 | 3 | Normalize | `extracted/` | `normalized/document.json` | NORMALIZING |
 | 4 | Chunk | `normalized/` | `chunks/chunks.jsonl` | CHUNKING |
-| 5 | Embed | `chunks/`, cache | `embeddings/vectors.parquet` | EMBEDDING |
-| 6 | Validate | `chunks/`, `embeddings/` | `_manifest.json` | VALIDATING → STAGED |
+| 5 | Embed | `chunks/`, cache | `embeddings/<table>.parquet` | EMBEDDING |
+| 6 | Validate | `chunks/`, `embeddings/` | `_manifest.<table>.json` | VALIDATING → STAGED |
 | 7 | Index | manifest, vectors | – (pgvector) | INDEXING |
 | 8 | Finalize | manifest | – | INDEXED |
 
@@ -126,7 +126,7 @@ Other ingestion resources:
 3. **Success.** The step item becomes SUCCEEDED, with timings, URIs and metrics, and the lease is extended.
 4. **Failure.** The error is classified (see section 7). Transient errors are retried by the state machine on the same step item, with `attempt` incremented.
 
-**Records per run** (brief §6.3):
+**Records per run:**
 
 | Run | Records |
 |---|---|
@@ -166,29 +166,31 @@ GSIs (sparse):
 ![Staging and vectors](diagrams/png/06-staging-vectors.png)
 
 **Staging** keeps one prefix per article version: `<article_id>/v<doc_version>/`.
-- A non-default target table gets its own `embeddings/<table>.parquet` and `_manifest.<table>.json`, so a reindex never overwrites what the live table is rebuilt from.
+- Every vector table has its own staged vectors and manifest, `embeddings/<table>.parquet` and `_manifest.<table>.json`; no table name is special. A reindex into a new table therefore never overwrites what the live table is rebuilt from.
 - Lifecycle: Finalize of a new version deletes the older versions' files, so they turn noncurrent; noncurrent versions move to Glacier IR after 30 days and expire after `staging_noncurrent_expiration_days` (90). The current version stays: it is the rebuild source. `_tmp/` and `_reindex/` expire. A delete removes every version of the article's files (and its embedding-cache entries) at once.
 
 **Vector tables:**
-- **One table per embedding profile** (model and dimension, [§8](#embedding-models)): `chunks_primary` (live) and `chunks_compact` (migration 002); `migrate` creates the table of any other profile with the same structure.
+- **One table per embedding profile** (model and dimension, [Embedding models](#embedding-models)), `chunks_<profile>`. No vector table is written in SQL: `migrate` generates every one, the default profile's included, from its profile (`vectorstore/profile_tables.py`). With the dev and prod tfvars these are `chunks_primary` (live) and `chunks_compact`.
 - **Columns:** `chunk_id` (sha256 of article, version and ordinal), `article_id`, `doc_version`, `ordinal`, `parent_id`, `parent_text`, `process_id`, `tenant_id` (NOT NULL, `default` when the producer row has none), `source`, `published_at` (date), `is_active`, `text`, `embed_text`, `heading_path`, `page_start`, `page_end`, `char_start`, `char_end`, `token_count`, `metadata`, `content_tsv` (generated: heading path weight A, text weight B), `embedding halfvec(N)`, `embedding_model`, `pipeline_version`, `created_at`.
 - **Indexes:**
   - HNSW (cosine) on the embedding;
   - `(article_id, doc_version)`;
   - GIN on `content_tsv`, active rows only;
   - `tenant_id`, `source`, `published_at`, active rows only.
-- **Row-level security** (migration 005): `ingest_reader` sees the rows of `app.tenant_id` (set per transaction by search), or every row when the query function's internal actions (evaluation, drift check) set `app.all_tenants`; neither set, nothing. `ingest_writer` and `ingest_views` see every row; the tables' owner bypasses RLS.
+- **Row-level security:** `ingest_reader` sees the rows of `app.tenant_id` (set per transaction by search), or every row when the query function's internal actions (evaluation, drift check) set `app.all_tenants`; neither set, nothing. `ingest_writer` and `ingest_views` see every row; the tables' owner bypasses RLS.
 
 **`chunks_active`** is a view over the live table's active rows, and readers use only this view. It is created `WITH (security_invoker = true)`, so row-level security applies as the caller, not as the view's owner. Switching models replaces the view in one transaction (DROP and CREATE), and so does rolling back.
 
 **The Index swap** happens in one transaction per article:
 1. Take an advisory lock on the article.
-2. COPY the new version in, inactive.
+2. Insert the new version, inactive (batched `INSERT … ON CONFLICT (chunk_id)`; no temp table or COPY, which would pin the RDS Proxy connection); refuse an older or tombstoned version.
 3. Verify the row count against the manifest.
 4. Flip `is_active` to the new version.
 5. Delete the older versions.
 
 Readers see version N until the commit, and only N+1 after it.
+
+**Schema.** One migration, `db/migrations/001_schema.sql`, holds what every vector table relies on: the pgvector extension (0.8 or newer), the database roles below, `article_tombstones` (a deleted article's version, so a late run can't write it back) and `profile_tables` (one row per profile table). After the migrations, `migrate` creates a table for every configured profile that has none, then recreates `chunks_active` over the default registry's live table. It reads that from DynamoDB, with `GetItem` on the `#CONFIG` items only, through the VPC's gateway endpoint, so even a rebuilt database serves what the registry says. Until a switch records a live table, it keeps the table the view already serves, or on a new database uses the default profile's table.
 
 **Database users** authenticate with IAM tokens; the app users have no stored passwords:
 - `ingest_writer`: Index and migrate.
@@ -210,7 +212,7 @@ The dispatcher turns each message into one execution named `{article_id}-{sha256
 - A PATCH or an unchanged article joining a new process still gets its own run, so it can be counted.
 - MANUAL, RECONCILER and BACKFILL runs append `-r<run id>`, so a replay always starts.
 
-**Admission control (backpressure).** Before StartExecution the dispatcher takes a slot of the message's lane: `live` for the ingest queue (`live_slots`, default 2 x Embed's reserved concurrency, else 8) and `backfill` for the backfill queue (`backfill_slots`, 2). A slot is a conditional write on `#SLOTS/<lane>#<i>` (free, or its lease expired), holds the run id, rides in the execution input and on RUN#, is extended at every step, and is released however the run ends (finish, retryable, handover to a delete, Claim SKIP/STALE/DONE, MarkFailed, a stale exit); a run that dies frees it when the lease runs out. With every slot busy the dispatcher waits up to 40 s, then returns the rest of its batch as item failures (visible again in 30 s): work waits on the queue, where its age is the real backlog, instead of piling up as executions that all hit Bedrock and the database at once. `dispatcher_max_concurrency` only bounds how fast runs start. Unparseable bodies go straight to the DLQ, so the queues' high `maxReceiveCount` (50) only covers waiting.
+**Admission control (backpressure).** Before StartExecution the dispatcher takes a slot of the message's lane: `live` for the ingest queue (`live_slots`, default 2 x Embed's reserved concurrency, else 8) and `backfill` for the backfill queue (`backfill_slots`, 2). A slot is a conditional write on `#SLOTS/<lane>#<i>` (free, or its lease expired), holds the run id, rides in the execution input and on RUN#, is extended at every step, and is released however the run ends (finish, retryable, handover to a delete, Claim SKIP/STALE/DONE, MarkFailed, a stale exit); a run that dies frees it when the lease runs out. With every slot busy the dispatcher waits up to `slot_wait_seconds` (40; below `dispatcher_timeout`, 60), then returns the rest of its batch as item failures (visible again after `DISPATCH_BUSY_VISIBILITY_SECONDS`, 30): work waits on the queue, where its age is the real backlog, instead of piling up as executions that all hit Bedrock and the database at once. `dispatcher_max_concurrency` only bounds how fast runs start. Unparseable bodies go straight to the DLQ, so the queues' high `maxReceiveCount` (50) only covers waiting.
 
 ## 7. Reliability
 
@@ -220,7 +222,7 @@ Every error is classified (`errors.py`):
 
 | Class | Codes | Handling |
 |---|---|---|
-| transient | `E_THROTTLED`, `E_UPSTREAM_5XX`, `E_TIMEOUT`, `E_DB_CONN`, `E_DB_CONFLICT`, `E_DB_SCHEMA` | The state machine retries with backoff and jitter (throttling: 12 attempts up to 120 s apart). If retries run out, the article is FAILED_RETRYABLE and the reconciler retries it up to 5 times, then marks it FAILED_PERMANENT. Throttling has its own budget (20) |
+| transient | `E_THROTTLED`, `E_UPSTREAM_5XX`, `E_TIMEOUT`, `E_DB_CONN`, `E_DB_CONFLICT`, `E_DB_SCHEMA` | The state machine retries with backoff and jitter (throttling: 12 attempts up to 120 s apart). If retries run out, the article is FAILED_RETRYABLE and the reconciler retries it up to 5 times (`RETRY_MAX_RETRYABLE`), then marks it FAILED_PERMANENT. Throttling has its own budget (`RETRY_MAX_THROTTLED`, 20) |
 | permanent | `E_SOURCE_MISSING`, `E_SOURCE_CHANGED`, `E_UNREADABLE`, `E_TOO_LARGE`, `E_UPSTREAM_4XX`, `E_VALIDATION_<CHECK>`, `E_BUG` | FAILED_PERMANENT, counted (`ArticlesFailedPermanent` by code) and in the reconciler's hourly digest. Replay after the fix (redrive by error code) |
 | skip | `E_EMPTY_TEXT` | SKIPPED, counted as skipped |
 
@@ -244,12 +246,14 @@ Unknown exceptions are permanent, so there are no unbounded retries. psycopg err
 ### Embedding models
 
 Every vector table is an **embedding profile**: a model and how to call it, in the table
-`chunks_<profile>`. Terraform's `embedding_profiles` reaches every function as JSON
-(`EMBEDDING_PROFILES`, parsed by `embedding/profiles.py`). The defaults:
+`chunks_<profile>`. Terraform's `embedding_profiles` and `default_profile` reach every function
+as `EMBEDDING_PROFILES` (JSON, parsed by `embedding/profiles.py`) and `DEFAULT_PROFILE`. Both are
+required: neither the code nor the Terraform variables have a default, so the models are named
+only in `terraform/envs/<env>/ingestion.tfvars`. The dev and prod tfvars configure:
 
 | Profile | Provider | Model | Dimension | Table |
 |---|---|---|---|---|
-| `primary` (default) | `bedrock` | `amazon.titan-embed-text-v2:0` | 1024 | `chunks_primary` |
+| `primary` (`default_profile`) | `bedrock` | `amazon.titan-embed-text-v2:0` | 1024 | `chunks_primary` |
 | `compact` | `bedrock` | `amazon.titan-embed-text-v2:0` | 512 | `chunks_compact` |
 
 **Profile names say what a table is for, not which model fills it.** The model and dimension
@@ -274,21 +278,22 @@ A profile's model and dimension never change once its table has data: add a new 
 | `openai_compatible` | anything behind the OpenAI embeddings API: a LiteLLM proxy, vLLM, TEI, Ollama | `POST {base_url}/embeddings {model, input: [batch], dimensions?, input_type?}` with `urllib` (no SDK, and not the `litellm` package: its size and its non-MIT enterprise code). `Authorization: Bearer` from the Secrets Manager secret `api_key_secret` (read once per container). 429 → `E_THROTTLED`, 5xx/connection → `E_UPSTREAM_5XX`, timeout → `E_TIMEOUT` (each retried 3 times in the call, then by the state machine), other 4xx → `E_UPSTREAM_4XX` (permanent). Normalized by the pipeline |
 
 An unknown Bedrock family is refused (Terraform validation, and at start-up). The dev and prod
-tfvars configure only Bedrock profiles; `openai_compatible` is there for later.
+tfvars configure only Bedrock profiles; `openai_compatible` is there for later. The
+`bedrock-throttled` alarm watches the default profile's model (or the first Bedrock profile's);
+with no Bedrock profile there is no throttle alarm.
 
-**Tables from profiles.** After the numbered migrations, `migrate` creates the table of every
-profile that has none (`vectorstore/profile_tables.py`): `LIKE chunks_primary` (columns,
-defaults, NOT NULLs, the weighted `content_tsv`), `embedding halfvec(<dimension>)`, the primary
-key and `tenant_id <> ''` check, the same partial HNSW / GIN / article-version / tenant / source /
-published_at indexes, row-level security with the same three policies, and the same grants
-(including `ingest_views`, so `chunks_active` can serve it). It is idempotent, refuses a table
-whose dimension differs from its profile's, and records every table in `profile_tables`
-(migration 007).
+**Tables from profiles.** After the migration, `migrate` creates the table of every profile that
+has none (`vectorstore/profile_tables.py`), all from one generator with the profile's dimension:
+the columns (including the weighted `content_tsv`), `embedding halfvec(<dimension>)`, the primary
+key and `tenant_id <> ''` check, the partial HNSW / GIN / article-version / tenant / source /
+published_at indexes, row-level security with three policies, and the grants (including
+`ingest_views`, so `chunks_active` can serve it). It is idempotent, refuses a table whose
+dimension differs from its profile's, and records every table in `profile_tables`.
 
 **Per-tenant registries.** Which tables runs write and which one search reads is kept per tenant
 (`vectorstore/registry.py`, items in `ingestion_status`):
 - `#CONFIG/VECTOR_TABLES`, the **default registry**: every tenant without its own, and articles
-  without a tenant. Before it has an item: the `default_profile` table alone. `chunks_active`
+  without a tenant (a missing `tenant_id` means no tenant). Before it has an item: the `default_profile` table alone. `chunks_active`
   serves its live table.
 - `#CONFIG/VECTOR_TABLES#<tenant>`, a **tenant's own registry**: stored on its first change
   (a reindex, switch or retire with that `tenant_id`, copied from the default registry), or implied
@@ -299,18 +304,17 @@ whose dimension differs from its profile's, and records every table in `profile_
 The dispatcher and requeue put the producer row's `tenant_id` on the `IngestMessage`; Claim
 writes the tenant's registry's tables and records `tenant_id` on LATEST. Search embeds the query
 with the tenant's live profile (as a query) and reads that table directly (`is_active` rows,
-row-level security as before), not `chunks_active`. With no tenant registries, everything behaves
-as before.
+row-level security), not `chunks_active`. With no tenant registries, every article follows the
+default registry.
 
 An article whose tenant changes to one whose registry writes **other tables** is re-run (new
 version) rather than metadata-updated; after any live run, Index re-tags the article's rows in
 tables its tenant doesn't write with the new tenant (rows are kept, for rollbacks), so the old
 tenant's searches can't see them. Within one registry, a tenant change stays a metadata update.
 
-**Cache keys.** `sha256(embed_text)#model@dim@norm` for Bedrock Titan (unchanged, so existing
-entries stay valid); every other profile adds `#<fingerprint>` of provider, model, dimension,
-normalization, endpoint host, document input type and `send_dimensions`, so two endpoints or
-settings never share entries.
+**Cache keys.** `sha256(embed_text)#model@dim@norm#<fingerprint>` for every profile. The
+fingerprint covers provider, model, dimension, normalization, endpoint host, document input type
+and `send_dimensions`, so two endpoints or settings never share entries.
 
 **Validate** checks chunks against the profile's input limit (`max_input_tokens`, capped by the
 family: Titan 8,192, Cohere v3 512, v4 128k). The counts are the chunker's (cl100k), an
@@ -326,15 +330,15 @@ where they are per text (Titan). The unit-length check applies only to profiles 
   2. A Distributed Map reads that file in batches. Each batch is an EXPRESS child execution, which enqueues messages to the backfill queue.
   3. Each article then runs from Embed (model change) or from Index (rebuild, with no Bedrock calls).
 - **Search.** `POST /v1/search` on the control API (outside the VPC, so it reaches Bedrock):
-  1. Authorization: the caller must read or write a source of the requested tenant, per the producer's `source_access` SSM parameter (cached 5 minutes; no parameter allows nothing).
-  2. The query is embedded with the tenant's live table's profile ([registries](#embedding-models)); the `query` function (`search_hybrid`, as `ingest_reader`, `app.tenant_id` set) takes the nearest vectors and the best `websearch_to_tsquery` matches (50+ each) and fuses them by reciprocal rank (k = 60), with optional filters on source, published date and process.
-  3. Optional Bedrock rerank (`rerank_enabled`, off by default); on any error the fused order stands.
-  Every search sets `hnsw.ef_search = max(100, 2 x candidates)` and `hnsw.iterative_scan = relaxed_order` (the default 40 couldn't return k = 50).
+  1. Authorization: the caller must read or write a source of the requested tenant, per the producer's `source_access` SSM parameter (cached `ACCESS_CACHE_SECONDS`, 300; no parameter allows nothing).
+  2. The query is embedded with the tenant's live table's profile ([registries](#embedding-models)); the `query` function (`search_hybrid`, as `ingest_reader`, `app.tenant_id` set) takes the nearest vectors and the best `websearch_to_tsquery` matches (`SEARCH_MIN_POOL`, 50, or more each) and fuses them by reciprocal rank (`SEARCH_RRF_K`, 60), with optional filters on source, published date and process.
+  3. Optional Bedrock rerank (`rerank_enabled`, off by default, model `rerank_model_id` from the tfvars); on any error the fused order stands.
+  Every search sets `hnsw.ef_search` to twice the candidates, within `SEARCH_MIN_EF_SEARCH` (100) and `SEARCH_MAX_EF_SEARCH` (1000), and `hnsw.iterative_scan = relaxed_order` (the default 40 couldn't return k = 50).
 - **Chunks.** Structure-aware (sections, sentences; tables and code atomic, a split table repeats its header row); small sibling sections merge under their parent heading; a heading with nothing under it is kept. Each chunk cites `char_start`/`char_end` in the normalized text (blocks joined by blank lines) and its pages. **Parent-child** (`parent_child_enabled`, off): children of ~256 tokens are embedded and matched; their section-level parent (up to ~1,024 tokens) is stored on each child (`parent_text`) and returned as `context`. Parents get no rows or vectors of their own, so nothing else (Index, deletes, drift check, RLS) changes.
 - **Embedding cache key:** see [Embedding models](#embedding-models).
 - **Metadata-only changes.** The dispatcher fingerprints each row's title + metadata + tenant (`meta_sha256`) and its title (`title_sha256`); LATEST keeps both. Same content and title with other metadata is Claim's `METADATA` action: Index rewrites tenant, source, published date and metadata on the active rows of every write table and ends the run (counted as skipped). A new title is a content change (it's in every `embed_text`): a new version. Index always takes these fields from the producer's current row, so replays and rebuilds write current values.
 - **Evaluation.**
-  - **Golden set:** `_eval/golden/<YYYYMMDD-HHMM>.jsonl`, never overwritten, and `_eval/golden/LATEST` naming the current one. `make_golden_set.py` samples chunks across each document and has Nova Lite write a question per chunk, labelled with its `chunk_id` and the article version, plus no-answer questions.
+  - **Golden set:** `_eval/golden/<YYYYMMDD-HHMM>.jsonl`, never overwritten, and `_eval/golden/LATEST` naming the current one (required: the eval fails without it). `make_golden_set.py` samples chunks across each document and has a Bedrock text model (`--model` or `GOLDEN_MODEL_ID`, required) write a question per chunk, labelled with its `chunk_id` and the article version, plus no-answer questions.
   - **Scoring:** the eval Lambda embeds each question, has `query` fetch the nearest 50 chunks, and scores chunk-level recall@5, recall@10, nDCG@10 and MRR (plus article recall@10), each with a bootstrap 95% CI. Questions whose article was deleted or changed version are dropped and counted.
   - **Outputs:** `_eval/<table>/<time>.json` (naming the golden set) and CloudWatch metrics. `{"baseline": true}` also scores the live table.
 - **Switch and roll back.** `POST /v1/tables/active` makes the chosen table live for the default registry (and points `chunks_active` at it) or, with `tenant_id`, for that tenant's registry only, after the coverage check (that tenant's indexed articles) and the **evaluation gate**: the table's newest report (< 7 days) must have recall@10 at least the live table's (same golden set) minus `eval_tolerance` (0.02). `force` skips both. Reports are per table, not per tenant: the golden set spans every tenant.
@@ -377,7 +381,7 @@ where they are per text (Titan). The unit-length check applies only to profiles 
 |---|---|---|
 | Table names | `dev-` prefix | none |
 | Database | `database_mode = "rds"`: one `db.t4g.micro`, direct IAM auth | `aurora`: Serverless v2 0.5–8 ACU + RDS Proxy |
-| Backups | 1 day | 7 days, final snapshot, deletion protection, `prevent_destroy`; AWS Backup daily for 35 days, copied to us-east-2 (`backup_enabled`) |
+| Backups | 1 day (`backup_copy_region = null`) | 7 days, final snapshot, deletion protection, `prevent_destroy`; AWS Backup daily for 35 days, copied to `backup_copy_region` (`backup_enabled`) |
 | OCR | off (free plan) | on (Textract) |
 | Embed reserved concurrency | none (10-concurrency account) | 4 |
 | Freshness alarm (p95, stream runs) | 15 min | 15 min |
@@ -386,26 +390,27 @@ where they are per text (Titan). The unit-length check applies only to profiles 
 | Logs | DEBUG, 30 days | INFO, 90 days |
 | Buckets | force-destroyable | not |
 
-Code is identical across environments. Only `terraform/envs/<env>/*.tfvars` and the backend files differ.
+Code is identical across environments. Only `terraform/envs/<env>/*.tfvars` (`common.tfvars`: region and mandatory tags; `<stack>.tfvars`: the rest) and the backend files differ. The account comes from `AWS_ACCOUNT_ID`, never a tracked file.
 
 ## 12. Infrastructure layout
 
 ![Delivery and teardown](diagrams/png/10-delivery-teardown.png)
 
-- **Modules:** 19 generic modules in `terraform/modules/`, each with tests, a README and an example, tagged `modules/<name>/vX.Y.Z`. They hold nothing service-specific.
+- **Modules:** 22 generic modules in `terraform/modules/`, each with tests, a README and an example, released as `modules/<name>/vX.Y.Z` tags. They hold nothing service-specific. `stack_common` derives what every stack shares (names, tags, permissions boundary, principals).
 - **Stacks:** `stacks/producer`, `stacks/ingestion` and `stacks/ui` compose the modules. Ingestion reads producer values from SSM, never from the producer's state. The ui stack reads both APIs from SSM and publishes its origin there for the producer's CORS ([UI.md](UI.md#first-time-setup) has the first-time apply order).
 - **Make targets:**
-  - `make plan|apply ENV= STACK=` pairs the environment's backend with its tfvars; `make deploy` is plan + confirm + apply (+ `migrate` for ingestion).
+  - `make build` builds the Lambda zips (deterministic).
+  - `make plan|apply ENV= STACK=` pairs the environment's backend with its tfvars (`common.tfvars`, then `<stack>.tfvars`); `make deploy` is plan + confirm + apply (+ `migrate` for ingestion).
   - Every function publishes a version per change behind a `live` alias that all callers use; `make rollback ENV= FN= VERSION=` moves it back.
   - `make check` runs the static checks.
   - `make destroy[-all]` tears down disposable environments.
   - `make ui-password|ui-deploy|ui-url|ui-dev ENV=` operate the upload UI.
 
-## 13. Decisions that differ from the briefs
+## 13. Design decisions
 
-| Brief | Implemented | Why |
+| Alternative | Implemented | Why |
 |---|---|---|
-| Execution name `{article_id}#{sha16}#{pipeline_version}` | `{article_id}-{sha256(content, process, updated_at, version)[:32]}` | Step Functions rejects `#`. The brief's key would also drop events that UC3 and UC11 must count |
+| Execution name `{article_id}#{sha16}#{pipeline_version}` | `{article_id}-{sha256(content, process, updated_at, version)[:32]}` | Step Functions rejects `#`. A key without the process and `updated_at` would also drop events that UC3 and UC11 must count |
 | Roll-up on LATEST transitions | Membership item per (process, article) | One article can belong to several processes |
 | Dispatcher concurrency bounds Bedrock | Embed's reserved concurrency bounds Bedrock calls, admission slots bound runs in flight | The dispatcher's concurrency only limits how fast executions start |
 | An SNS alert per permanently failed article | `ArticlesFailedPermanent` metric + one hourly digest | A bad batch would otherwise send thousands of emails |
@@ -418,9 +423,9 @@ Code is identical across environments. Only `terraform/envs/<env>/*.tfvars` and 
 ## 14. Known limits and open items
 
 - **OCR with real Textract is unverified,** because the dev account is on the free plan. UC12 runs in the first paid environment.
-- **Not built yet:** HNSW drop-and-rebuild for bulk loads; the evaluation gate in CI, which needs AWS credentials in CI.
-- **Unverified on AWS** (static work and local tests only): hybrid search and rerank against Bedrock, Textract LAYOUT/TABLES output on real scans, Comprehend PII screening, and migrations 005/006 on RDS/Aurora (tested on PostgreSQL 18 + pgvector 0.8.1 with non-superuser roles).
-- **Embedding endpoints:** Embed, the control API and eval run outside the VPC (no NAT), so an `openai_compatible` endpoint must be reachable from the internet over HTTPS with an API key. An endpoint inside the VPC needs those functions in the VPC with a NAT gateway (or the endpoint behind a public load balancer); not built. Chunk size is global (one chunking per article), so a model with a small input limit (Cohere v3: 512 tokens) needs smaller chunks or parent-child chunking for every table. Evaluation reports are per table, not per tenant. Articles indexed before LATEST recorded `tenant_id` fall back to the producer row's tenant (a BatchGetItem) when some tenant has its own registry; tenant moves are only detected for articles whose LATEST has it. The `openai_compatible` path and Cohere on Bedrock are unit-tested against stubs, not yet against real endpoints.
+- **Not built yet:** HNSW drop-and-rebuild for bulk loads; CI (the workflow is disabled, so the checks run locally) and an evaluation gate in it, which would need AWS credentials in CI.
+- **Unverified on AWS** (static work and local tests only): hybrid search and rerank against Bedrock, Textract LAYOUT/TABLES output on real scans, Comprehend PII screening, and the schema and generated profile tables on RDS/Aurora (tested on PostgreSQL 18 + pgvector 0.8.1 with non-superuser roles).
+- **Embedding endpoints:** Embed, the control API and eval run outside the VPC (no NAT), so an `openai_compatible` endpoint must be reachable from the internet over HTTPS with an API key. An endpoint inside the VPC needs those functions in the VPC with a NAT gateway (or the endpoint behind a public load balancer); not built. Chunk size is global (one chunking per article), so a model with a small input limit (Cohere v3: 512 tokens) needs smaller chunks or parent-child chunking for every table. Evaluation reports are per table, not per tenant. The `openai_compatible` path and Cohere on Bedrock are unit-tested against stubs, not yet against real endpoints.
 - **Dev concurrency:** the dev account's 10-concurrency Lambda limit slows big reindexes and can throttle the control API.
 - **Open decisions:** alarm email subscriptions are parked (prod plans fail until `alarm_emails` is set), and the choice between Terraform and OpenTofu (Terraform is BUSL-licensed) is still open.
 - **DR follow-ups:** S3 cross-region replication of the raw and staging buckets; a rehearsed region failover (backups are copied, no standby stack). The DLQ new-message alarms (`DIFF` of the visible count) and the slot waiting behaviour are unverified on AWS.

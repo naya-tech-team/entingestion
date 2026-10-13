@@ -1,4 +1,4 @@
-# Ingest workflow: one Standard execution per article version (brief §4).
+# Ingest workflow: one Standard execution per article version.
 
 locals {
   ingest_definition = templatefile("${path.module}/asl/ingest.asl.json.tftpl", merge(
@@ -28,7 +28,7 @@ module "ingest_workflow" {
   permissions_boundary = local.permissions_boundary
 }
 
-# Reindex / rebuild (brief §7.3): Distributed Map over the planned articles -> backfill queue.
+# Reindex / rebuild: Distributed Map over the planned articles -> backfill queue.
 module "reindex_workflow" {
   source = "../../modules/step_function"
 

@@ -1,4 +1,4 @@
-# Reconciler (brief §11): EventBridge Scheduler runs it on a fixed schedule (hourly by default).
+# Reconciler: EventBridge Scheduler runs it on a fixed schedule (hourly by default).
 
 module "reconcile_schedule" {
   source = "../../modules/scheduler_schedule"
@@ -15,7 +15,7 @@ module "reconcile_schedule" {
   permissions_boundary  = local.permissions_boundary
 }
 
-# Weekly chunk-count drift check (brief §11 step 6): the same function with {"drift": true}.
+# Weekly chunk-count drift check: the same function with {"drift": true}.
 module "drift_schedule" {
   source = "../../modules/scheduler_schedule"
 

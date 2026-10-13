@@ -10,6 +10,7 @@ import boto3
 import pytest
 
 from ingest import aws, events, telemetry
+from ingest.config import get_settings
 from ingest.errors import ErrorCode, IngestPermanent, IngestStale
 from ingest.ids import new_run_id
 from ingest.models.status import ArticleStatus, StepName
@@ -233,7 +234,6 @@ def claimed(article_id: str = "art_1") -> dict[str, Any]:
 
 
 def test_throttling_has_its_own_retry_budget(env: Env) -> None:
-    from ingest.steps import mark_failed
 
     out = mark(claimed(), "Lambda.TooManyRequestsException", code="E_BUG")
     item = latest("art_1")
@@ -245,7 +245,7 @@ def test_throttling_has_its_own_retry_budget(env: Env) -> None:
     aws.status_store().table.update_item(
         Key=keys.latest_key("art_1"),
         UpdateExpression="SET throttle_count = :n",
-        ExpressionAttributeValues={":n": mark_failed.MAX_THROTTLED - 1},
+        ExpressionAttributeValues={":n": get_settings().retry.max_throttled - 1},
     )
     again = claimed()  # the reconciler's retry: a new run of the article
     assert mark(again, "IngestThrottled")["outcome"] == "FAILED_PERMANENT"

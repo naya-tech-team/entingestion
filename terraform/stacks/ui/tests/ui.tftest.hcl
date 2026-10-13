@@ -478,7 +478,7 @@ run "zip_mode_hashes_the_local_package" {
   }
 
   assert {
-    condition     = local.lambda_code.zip_path == "tests/fixtures/lambda.zip" && local.lambda_code.source_code_hash == filebase64sha256("tests/fixtures/lambda.zip")
+    condition     = module.lambda_artifact.code.zip_path == "tests/fixtures/lambda.zip" && module.lambda_artifact.code.source_code_hash == filebase64sha256("tests/fixtures/lambda.zip")
     error_message = "Zip mode deploys the local package with its hash."
   }
 }
@@ -491,4 +491,28 @@ run "rejects_a_bad_env" {
   }
 
   expect_failures = [var.env]
+}
+
+run "default_tags_and_boundary_are_unchanged" {
+  command = plan
+
+  assert {
+    condition = module.common.default_tags == {
+      "Name"                 = "ui-dev"
+      "Created By"           = "test"
+      "Created Date"         = "2026-01-01"
+      "Owner"                = "test"
+      "Internal Client Code" = "test"
+      "Client"               = "test"
+      "Project Name"         = "test"
+      "Division"             = "test"
+      "env"                  = "dev"
+    }
+    error_message = "The provider tags every resource with the 8 mandatory tags (Name = ui-<env>) and env."
+  }
+
+  assert {
+    condition     = local.permissions_boundary == "arn:aws:iam::123456789012:policy/entingestion-dev-workload-boundary" && module.boundary_check.all_bounded && module.bff.function_name == "ui-dev-bff"
+    error_message = "The workload boundary ARN and the names are unchanged; every role carries the boundary."
+  }
 }

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { api, query } from "../../api";
 import { ConfirmAction } from "../../components/ConfirmAction";
 import { ErrorBanner, Loading, StatusBadge } from "../../components/common";
-import { useOverview } from "../../components/useOverview";
+import { useOverview } from "../../hooks/useOverview";
+import { usePagedList } from "../../hooks/usePagedList";
 import { formatTime } from "../../format";
 import {
   allSelected,
@@ -15,7 +16,7 @@ import {
   toggleAll,
   toggleOne,
 } from "../../ops";
-import type { ActionResponse, OpsArticle, OpsArticlePage } from "../../types";
+import type { ActionResponse, OpsArticle } from "../../types";
 
 const PAGE_SIZE = 50;
 
@@ -27,45 +28,15 @@ export function FailedPage() {
   const [params, setParams] = useSearchParams();
   const status = params.get("status") || DEFAULT_FAILED_STATUS;
   const { overview } = useOverview(null);
-  const [items, setItems] = useState<OpsArticle[]>([]);
-  const [nextToken, setNextToken] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState<unknown>(null);
+  const { items, nextToken, loading, loaded, error, loadMore, reload } = usePagedList<OpsArticle>(
+    (token) => `/api/ops/articles${query({ status, limit: PAGE_SIZE, next_token: token })}`,
+    [status],
+  );
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [force, setForce] = useState(false);
   const selectAllRef = useRef<HTMLInputElement>(null);
-
-  const load = useCallback(
-    async (token: string | null, signal?: AbortSignal) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const page = await api.get<OpsArticlePage>(
-          `/api/ops/articles${query({ status, limit: PAGE_SIZE, next_token: token })}`,
-          signal,
-        );
-        setItems((cur) => (token ? [...cur, ...page.items] : page.items));
-        setNextToken(page.next_token);
-        setLoaded(true);
-      } catch (err) {
-        if (!signal?.aborted) setError(err);
-      } finally {
-        if (!signal?.aborted) setLoading(false);
-      }
-    },
-    [status],
-  );
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    setItems([]);
-    setNextToken(null);
-    setSelected(new Set());
-    setLoaded(false);
-    void load(null, ctrl.signal);
-    return () => ctrl.abort();
-  }, [load]);
+  // Another status is another list: drop the selection.
+  useEffect(() => setSelected(new Set()), [status]);
 
   const pageIds = items.map((a) => a.article_id);
   const all = allSelected(selected, pageIds);
@@ -99,7 +70,7 @@ export function FailedPage() {
             ))}
           </select>
         </div>
-        <button type="button" onClick={() => void load(null)} disabled={loading}>
+        <button type="button" onClick={reload} disabled={loading}>
           Refresh
         </button>
       </div>
@@ -127,7 +98,7 @@ export function FailedPage() {
           run={rerun}
           onDone={() => {
             setSelected(new Set());
-            void load(null);
+            reload();
           }}
         />
       </div>
@@ -203,7 +174,7 @@ export function FailedPage() {
       {loading && <Loading />}
       {nextToken && !loading && (
         <div className="actions">
-          <button type="button" onClick={() => void load(nextToken)}>
+          <button type="button" onClick={loadMore}>
             Load more
           </button>
         </div>

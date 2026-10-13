@@ -1,4 +1,4 @@
-"""Retrieval evaluation against a golden set (review M3.4).
+"""Retrieval evaluation against a golden set.
 
 The golden set is versioned JSON lines in staging, _eval/golden/<YYYYMMDD-HHMM>.jsonl, and
 _eval/golden/LATEST names the current one (scripts/make_golden_set.py writes both and never
@@ -7,9 +7,9 @@ overwrites a set). Each line:
     {"id": ..., "question": ..., "article_id": ..., "doc_version": 3,
      "chunk_ids": ["..."], "no_answer": false}
 
-no_answer questions have no relevant chunk; they're reported apart (how high the best score
-goes for a question the corpus can't answer). A set from before chunk labels (_eval/golden.jsonl,
-article ids only) still gives the article-level score.
+Every answerable question names its relevant chunks (chunk_ids) and the article version they
+belong to. no_answer questions have no relevant chunk; they're reported apart (how high the best
+score goes for a question the corpus can't answer).
 
 The eval Lambda embeds each question (as a query) with the evaluated table's embedding profile,
 asks the query function (inside the VPC) for the nearest 50 chunks, and scores:
@@ -46,9 +46,10 @@ from aws_lambda_powertools import Logger, Metrics
 from aws_lambda_powertools.metrics import MetricUnit
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from botocore.exceptions import ClientError
+from entcommon.timeutil import parse_iso
 
 from ingest import aws
-from ingest.config import get_settings
+from ingest.config import get_settings, require
 from ingest.embedding.factory import make_embedder
 from ingest.models.status import ArticleStatus
 from ingest.search import call_query
@@ -57,9 +58,9 @@ from ingest.vectorstore.targets import target
 logger = Logger()
 metrics = Metrics(namespace="Ingestion")  # same as POWERTOOLS_METRICS_NAMESPACE
 
+REQUIRED = ("status_table", "staging_bucket", "query_function_name")
 GOLDEN_DIR = "_eval/golden/"
 GOLDEN_POINTER = f"{GOLDEN_DIR}LATEST"
-LEGACY_GOLDEN = "_eval/golden.jsonl"
 CHUNKS_PER_QUERY = 50  # enough distinct articles for recall@10
 _SEARCH_BATCH = 20
 BOOTSTRAP_SAMPLES = 1000
@@ -88,23 +89,14 @@ class Judged:
     ndcg_at_10: float
     mrr: float
     article_recall_at_10: float
-    labelled: bool = True  # chunk labels (False: an article-only legacy question)
 
 
 def judge(hits: Sequence[dict[str, Any]], relevant: set[str], article_id: str) -> Judged:
     ranked = [str(h["chunk_id"]) for h in hits]
     articles = article_ranking(hits)
     article_hit = 1.0 if article_id in articles[:10] else 0.0
-    if not relevant:  # legacy line: article-level only
-        rank = articles.index(article_id) + 1 if article_id in articles else None
-        return Judged(
-            recall_at_5=1.0 if article_id in articles[:5] else 0.0,
-            recall_at_10=article_hit,
-            ndcg_at_10=article_hit / math.log2((rank or 1) + 1) if rank and rank <= 10 else 0.0,  # noqa: PLR2004
-            mrr=1 / rank if rank else 0.0,
-            article_recall_at_10=article_hit,
-            labelled=False,
-        )
+    if not relevant:
+        raise ValueError(f"a question about {article_id} has no relevant chunk_ids")
     found = [i for i, c in enumerate(ranked, start=1) if c in relevant]
     dcg = sum(1 / math.log2(r + 1) for r in found if r <= 10)  # noqa: PLR2004
     ideal = sum(1 / math.log2(r + 1) for r in range(1, min(len(relevant), 10) + 1))
@@ -143,13 +135,20 @@ def summarize(judged: Sequence[Judged]) -> dict[str, Any]:
 
 
 def load_golden(read: Callable[[str], bytes | None]) -> tuple[str, list[dict[str, Any]]]:
-    """(key, questions) of the current golden set: the one LATEST names, else the legacy file."""
+    """(key, questions) of the current golden set: the one LATEST names. Every answerable
+    question must name its relevant chunk_ids and their doc_version."""
     pointer = read(GOLDEN_POINTER)
-    key = pointer.decode().strip() if pointer else LEGACY_GOLDEN
+    if not pointer:
+        raise FileNotFoundError(f"no {GOLDEN_POINTER}; run scripts/make_golden_set.py")
+    key = pointer.decode().strip()
     body = read(key)
     if body is None:
         raise FileNotFoundError(f"no golden set at {key}; run scripts/make_golden_set.py")
-    return key, [json.loads(line) for line in body.decode().splitlines() if line.strip()]
+    questions = [json.loads(line) for line in body.decode().splitlines() if line.strip()]
+    for q in questions:
+        if not q.get("no_answer") and not (q.get("chunk_ids") and q.get("doc_version")):
+            raise ValueError(f"{key}: question {q.get('id')!r} has no chunk_ids or doc_version")
+    return key, questions
 
 
 def _read_staging(key: str) -> bytes | None:
@@ -163,8 +162,8 @@ def _read_staging(key: str) -> bytes | None:
 
 
 def current(questions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """The questions still answerable as labelled: their article is indexed (not deleted) and,
-    for chunk labels, still at the labelled version."""
+    """The questions still answerable as labelled: their article is indexed (not deleted) and
+    still at the labelled version."""
     store = aws.status_store()
     latest: dict[str, dict[str, Any] | None] = {}
     kept, dropped = [], {"deleted": 0, "stale": 0}
@@ -178,7 +177,7 @@ def current(questions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
         item = latest[article] or {}
         if item.get("status") != ArticleStatus.INDEXED:
             dropped["deleted"] += 1
-        elif q.get("chunk_ids") and int(q.get("doc_version") or 0) != int(item["doc_version"]):
+        elif int(q["doc_version"]) != int(item["doc_version"]):
             dropped["stale"] += 1
         else:
             kept.append(q)
@@ -203,7 +202,7 @@ def evaluate(
     name = table or call_query({"action": "describe"})["active_table"]
     t = target(str(name))
     model = make_embedder(t.profile)
-    with ThreadPoolExecutor(max_workers=max(1, settings.embed_concurrency)) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, settings.embedding.concurrency)) as pool:
         vectors = list(pool.map(lambda g: model.embed_query(str(g["question"])).vector, questions))
     results: list[list[dict[str, Any]]] = []
     for i in range(0, len(vectors), _SEARCH_BATCH):
@@ -245,7 +244,6 @@ def evaluate(
         "at": at.isoformat(timespec="seconds").replace("+00:00", "Z"),
         "golden": golden_key,
         "dropped": dropped,
-        "chunk_labelled": sum(1 for j in judged if j.labelled),
         **summarize(judged),
         "no_answer": {
             "questions": len(top_none),
@@ -288,7 +286,7 @@ def _missing_or_old(
 ) -> dict[str, Any] | None:
     if report is None:
         return {"message": f"{table} has no evaluation report"}
-    at = datetime.fromisoformat(str(report["at"]).replace("Z", "+00:00"))
+    at = parse_iso(str(report["at"]))
     if max_age_days is not None and (now - at).days >= max_age_days:
         days = (now - at).days
         return {
@@ -348,6 +346,7 @@ def _summary(e: Evaluation) -> dict[str, Any]:
 @logger.inject_lambda_context(clear_state=True)
 @metrics.log_metrics
 def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+    require(*REQUIRED)
     golden_key, questions = load_golden(_read_staging)
     questions, dropped = current(questions)
     table = event.get("table")

@@ -1,7 +1,8 @@
-"""Phase 1 gate (brief §15): sample articles from the dev producer are indexed, and record counts
-per run match §6.3.
+"""Phase 1 gate: sample articles from the producer are indexed, and every first run writes the
+expected status records (RUN# + one item per step, and LATEST).
 
     uv run python scripts/gate_phase1.py --corpus <dir> [--env dev] [--timeout-minutes 90]
+                                         [--source gate1k]   (or $GATE_SOURCE)
 
 1. Invokes the migrate Lambda (idempotent).
 2. Ingests the corpus through the real producer (producer-cli ingest-dir --close).
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -21,24 +23,15 @@ from collections import Counter
 from pathlib import Path
 
 import boto3
-
-ROOT = Path(__file__).resolve().parents[3]
-
-
-def tf_output(stack: str, env: str, name: str) -> str:
-    return subprocess.check_output(
-        ["terraform", "output", "-raw", name],
-        cwd=ROOT / "terraform" / "stacks" / stack,
-        env={**__import__("os").environ, "TF_DATA_DIR": f".terraform/{env}"},
-        text=True,
-    ).strip()
+from _tf import ROOT, default_env, tf_output
 
 
 def main() -> int:  # noqa: PLR0912, PLR0915 - a linear checklist
     parser = argparse.ArgumentParser()
     parser.add_argument("--corpus", type=Path, required=True)
-    parser.add_argument("--env", default="dev")
+    parser.add_argument("--env", default=default_env())
     parser.add_argument("--timeout-minutes", type=int, default=90)
+    parser.add_argument("--source", default=os.environ.get("GATE_SOURCE", "gate1k"))
     args = parser.parse_args()
 
     lam = boto3.client("lambda")
@@ -67,7 +60,7 @@ def main() -> int:  # noqa: PLR0912, PLR0915 - a linear checklist
             "--name",
             "ingestion phase 1 gate",
             "--source",
-            "gate1k",
+            args.source,
             "--close",
         ],
         cwd=ROOT / "services" / "producer",

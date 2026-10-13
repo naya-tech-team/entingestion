@@ -51,7 +51,7 @@ module "bff" {
   memory_size = var.bff_memory_size
   # CloudFront waits 30 s for the origin; the BFF gives up on an API after 3 s + 25 s.
   timeout = 29
-  code    = local.lambda_code
+  code    = module.lambda_artifact.code
   environment = {
     PRODUCER_API_URL        = local.upstream.producer_api_url
     CONTROL_API_URL         = local.upstream.control_api_url

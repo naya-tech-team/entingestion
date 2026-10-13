@@ -1,6 +1,6 @@
 """The pipeline end to end, in process: the real handlers run in state-machine order against moto,
-with Bedrock stubbed and pgvector replaced by an in-memory store. Asserts the record counts of
-brief §6.3 and the UC3/UC5/DUP/CONC/delete scenarios."""
+with Bedrock stubbed and pgvector replaced by an in-memory store. Asserts the status records
+each run writes and the UC3/UC5/DUP/CONC/delete scenarios (docs/USE_CASES.md)."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ PAGE = (
 class FakeContext:
     function_name = "test"
     memory_limit_in_mb = 512
-    invoked_function_arn = "arn:aws:lambda:us-west-2:123456789012:function:test"
+    invoked_function_arn = f"arn:aws:lambda:{REGION}:123456789012:function:test"
     aws_request_id = "req"
 
 
@@ -185,7 +185,6 @@ def produce(
         "content_sha256": sha,
         "status": "STAGED",
         "updated_at": updated_at,
-        "updated_date": updated_at[:10],
         "updated_shard": f"{updated_at[:10]}#{zlib.crc32(article_id.encode()) % 16:02d}",
         **fields,
     }
@@ -305,7 +304,7 @@ def test_new_article_is_indexed_with_ten_records(env: tuple[FakeVectorStore, Fak
     assert item["status"] == "INDEXED"
     assert item["chunk_count"] == len(store.active("art_1")) > 0
     assert "lease_owner" not in item
-    # First run: RUN# + 8 step items + the new LATEST = 10 records (brief §6.3).
+    # First run: RUN# + 8 step items + the new LATEST = 10 records.
     assert len(run_items("art_1", run_id)) == 9
     assert all(
         i["step_status"] == "SUCCEEDED" for i in run_items("art_1", run_id) if "#STEP#" in i["sk"]
@@ -317,9 +316,9 @@ def test_new_article_is_indexed_with_ten_records(env: tuple[FakeVectorStore, Fak
     )
     names = sorted(o["Key"].removeprefix("art_1/v1/") for o in staged["Contents"])
     assert names == [
-        "_manifest.json",
+        "_manifest.chunks_primary.json",
         "chunks/chunks.jsonl",
-        "embeddings/vectors.parquet",
+        "embeddings/chunks_primary.parquet",
         "extracted/content.json",
         "normalized/document.json",
     ]
@@ -640,7 +639,7 @@ def test_a_retried_finalize_reannounces_without_undoing_the_run(
 
 def _queued() -> list[dict[str, Any]]:
     sqs = boto3.client("sqs", region_name=REGION)
-    url = aws.get_settings().ingest_queue_url
+    url = aws.get_settings().queues.ingest_url
     out: list[dict[str, Any]] = []
     while messages := sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10).get("Messages"):
         for m in messages:
@@ -713,7 +712,7 @@ def test_the_tenant_comes_from_the_producer_row_not_metadata(
     assert json.loads(doc["Body"].read())["tenant_id"] == "t-news"
 
 
-# -- metadata-only changes (review M3.1) -----------------------------------------------------
+# -- metadata-only changes -----------------------------------------------------------------
 
 
 def test_a_metadata_change_updates_the_rows_in_place(

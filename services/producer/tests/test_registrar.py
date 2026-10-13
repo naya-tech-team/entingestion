@@ -197,7 +197,8 @@ def test_concurrent_count_conflicts_are_retried(
     still land (otherwise the process never settles)."""
     from botocore.exceptions import ClientError
 
-    from producer import registrar, repository
+    from producer import registrar
+    from producer.repository import transactions
 
     pid = new_process(api)
     t = ticket(api, pid)
@@ -219,7 +220,7 @@ def test_concurrent_count_conflicts_are_retried(
         return real(**kwargs)
 
     monkeypatch.setattr(client, "transact_write_items", conflicting)
-    monkeypatch.setattr(repository, "CONFLICT_BASE_S", 0)
+    monkeypatch.setattr(transactions, "CONFLICT_BASE_S", 0)
 
     assert deliver(s3_event(key_of(t))) == {"batchItemFailures": []}
 
@@ -501,7 +502,7 @@ def test_whole_batch_failure_raises_so_lambda_reports_an_error(
     monkeypatch.setattr(registrar.get_registrar(), "register", boom)
     event = {"Records": [sqs_record("msg-1", s3_event(key_of(t)))]}
 
-    # SQS retries the whole batch, and the function's Errors metric (alarmed in Phase 3) fires.
+    # SQS retries the whole batch, and the function's Errors metric (alarmed) fires.
     with pytest.raises(BatchProcessingError):
         registrar.lambda_handler(event, FakeContext())  # type: ignore[arg-type]
     assert upload(t["upload_id"])["status"] == "PENDING"

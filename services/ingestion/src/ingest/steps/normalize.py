@@ -30,7 +30,7 @@ def _screen(
     """Apply the source's PII policy: (title, blocks, finding). Blocking raises E_PII_BLOCKED."""
     action = access.policy().pii_for(source)
     texts = [title or "", *(b.text for b in blocks)]
-    found = pii.screen(texts, detector(), ctx.settings.pii_min_score)
+    found = pii.screen(texts, detector(), ctx.settings.pii.min_score)
     summary = found.summary(action)
     ctx.store.annotate(
         ctx.ref, {"pii_count": found.found, "pii_types": sorted(found.counts), "pii_action": action}
@@ -46,7 +46,7 @@ def _screen(
     return title, blocks, summary
 
 
-@step(StepName.NORMALIZE, input_name=INPUT)
+@step(StepName.NORMALIZE, input_name=INPUT, requires=("producer_articles_table",))
 def handler(ctx: StepContext) -> StepOutput:
     extracted = ExtractedContent.model_validate_json(ctx.staging.read(ctx.staging_prefix, INPUT))
     blocks = normalize_blocks(extracted.blocks)
@@ -58,7 +58,7 @@ def handler(ctx: StepContext) -> StepOutput:
     raw_title = row.get("title") or extracted.title
     title = clean_text(raw_title) if raw_title else None
     finding = None
-    if ctx.settings.pii_screening:
+    if ctx.settings.pii.screening:
         title, blocks, finding = _screen(ctx, row.get("source"), title, blocks)
     doc = NormalizedDocument(
         article_id=ctx.article_id,

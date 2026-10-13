@@ -1,4 +1,4 @@
-"""Dispatcher (brief §4.3): SQS ingest/backfill queues -> one Step Functions execution per article
+"""Dispatcher: SQS ingest/backfill queues -> one Step Functions execution per article
 version per process.
 
 Bodies are either an IngestMessage (reconciler, control API) or a raw DynamoDB stream record that
@@ -8,7 +8,8 @@ delivered 3x starts one execution; ExecutionAlreadyExists is acknowledged and dr
 Admission control: a run starts only with a slot of its lane (live: the ingest queue, backfill:
 the backfill queue), #SLOTS/<lane>#<i> in ingestion_status, held until the run ends. When every
 slot is busy the invocation waits up to SLOT_WAIT_SECONDS for one, then hands the rest of its
-batch back to the queue (batch item failures, a short visibility timeout): work waits on the
+batch back to the queue (batch item failures, visible again after
+DISPATCH_BUSY_VISIBILITY_SECONDS): work waits on the
 queue, where its age is the real backlog, not as running executions. A body that can never
 start (unparseable) goes straight to the lane's DLQ, so the queues' high maxReceiveCount only
 covers waiting.
@@ -34,7 +35,7 @@ from boto3.dynamodb.types import TypeDeserializer
 from botocore.exceptions import ClientError
 
 from ingest import aws, producer
-from ingest.config import get_settings
+from ingest.config import get_settings, require
 from ingest.ids import execution_name, new_run_id
 from ingest.models.messages import IngestMessage
 
@@ -46,11 +47,9 @@ metrics = Metrics()
 processor = BatchProcessor(event_type=EventType.SQS, raise_on_entire_batch_failure=False)
 _deserializer = TypeDeserializer()
 
+REQUIRED = ("status_table", "state_machine_arn")
 LIVE = "live"
 BACKFILL = "backfill"
-SLOT_POLL_SECONDS = 2.0
-# A record handed back for want of a slot is visible again this soon (not the queue's 6 min).
-BUSY_VISIBILITY_SECONDS = 30
 # Leave this much of the invocation for the records after the wait and the response.
 _RESERVE_MS = 15_000
 
@@ -105,7 +104,7 @@ def admit(lane: str, run_id: str) -> str | None:
     """A slot of the lane for this run, waiting for one until the invocation's deadline. None
     when the lane has no limit (size 0). Raises SlotsBusy."""
     settings = get_settings()
-    size = settings.backfill_slots if lane == BACKFILL else settings.live_slots
+    size = settings.admission.backfill_slots if lane == BACKFILL else settings.admission.live_slots
     if size <= 0:
         return None
     store = aws.status_store()
@@ -113,9 +112,10 @@ def admit(lane: str, run_id: str) -> str | None:
         slot = store.acquire_slot(lane, size, run_id)
         if slot is not None:
             return slot
-        if time.monotonic() + SLOT_POLL_SECONDS > _Invocation.deadline:
+        poll = settings.admission.slot_poll_seconds
+        if time.monotonic() + poll > _Invocation.deadline:
             raise SlotsBusy(f"all {size} {lane} slots are busy")
-        time.sleep(SLOT_POLL_SECONDS)
+        time.sleep(poll)
 
 
 def start(message: IngestMessage, lane: str = LIVE) -> str:
@@ -154,7 +154,7 @@ def start(message: IngestMessage, lane: str = LIVE) -> str:
 
 
 def lane_of(record: SQSRecord) -> str:
-    backfill = get_settings().backfill_queue_arn
+    backfill = get_settings().queues.backfill_arn
     return BACKFILL if backfill and record.event_source_arn == backfill else LIVE
 
 
@@ -171,7 +171,8 @@ def _wait_on_queue(record: SQSRecord) -> None:
         aws.sqs().change_message_visibility(
             QueueUrl=_queue_url(record.event_source_arn),
             ReceiptHandle=record.receipt_handle,
-            VisibilityTimeout=BUSY_VISIBILITY_SECONDS,
+            # Visible again soon, not after the queue's visibility timeout.
+            VisibilityTimeout=get_settings().admission.busy_visibility_seconds,
         )
     except Exception:
         logger.warning("couldn't shorten the visibility of a waiting record", exc_info=True)
@@ -181,7 +182,7 @@ def _dead_letter(record: SQSRecord, lane: str, reason: str) -> None:
     """A body that can never start: straight to the lane's DLQ (the DLQ alarm fires), instead
     of waiting out maxReceiveCount."""
     settings = get_settings()
-    url = settings.backfill_dlq_url if lane == BACKFILL else settings.ingest_dlq_url
+    url = settings.queues.backfill_dlq_url if lane == BACKFILL else settings.queues.ingest_dlq_url
     if not url:
         raise ValueError(reason)  # no DLQ configured: let the queue's redrive policy move it
     aws.sqs().send_message(
@@ -220,8 +221,9 @@ def record_handler(record: SQSRecord) -> None:
 @tracer.capture_lambda_handler
 @metrics.log_metrics
 def handler(event: dict[str, Any], context: LambdaContext) -> PartialItemFailureResponse:
+    require(*REQUIRED)
     budget_ms = context.get_remaining_time_in_millis() - _RESERVE_MS
-    wait_s = min(float(get_settings().slot_wait_seconds), max(0.0, budget_ms / 1000))
+    wait_s = min(float(get_settings().admission.slot_wait_seconds), max(0.0, budget_ms / 1000))
     _Invocation.deadline = time.monotonic() + wait_s
     return process_partial_response(
         event=event, record_handler=record_handler, processor=processor, context=context

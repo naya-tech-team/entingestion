@@ -1,24 +1,22 @@
-"""Step 7: Validate -> _manifest.json. The gate before pgvector (requirement 4): Index refuses
-anything without a passing manifest."""
+"""Step 7: Validate -> _manifest.<table>.json per vector table. The gate before pgvector: Index
+refuses anything without a passing manifest."""
 
 from __future__ import annotations
 
 import math
 
 from aws_lambda_powertools.metrics import MetricUnit
+from entcommon.timeutil import iso_now
 
 from ingest.embedding.vectors import VectorRow, from_parquet
 from ingest.errors import IngestError, make_error, validation_code
-from ingest.ids import STAGING_FILES
 from ingest.models.staging import CheckResult, Chunk, Manifest
 from ingest.models.status import StepName
 from ingest.staging.io import StagedObject
 from ingest.steps.embed import read_chunks
 from ingest.steps.protocol import StepContext, StepOutput, logger, metrics, step
-from ingest.timeutil import iso_now
 from ingest.vectorstore.targets import Target
 
-OUTPUT = STAGING_FILES["VALIDATE"]
 _NORM_TOLERANCE = 0.02
 
 
@@ -77,7 +75,11 @@ def run_checks(
     }
 
 
-@step(StepName.VALIDATE, input_name=STAGING_FILES["EMBED"])
+def _vectors(ctx: StepContext) -> str:
+    return ctx.target.vectors_file
+
+
+@step(StepName.VALIDATE, input_name=_vectors)
 def handler(ctx: StepContext) -> StepOutput:
     chunks = read_chunks(ctx)
     primary, *others = ctx.targets
@@ -107,7 +109,7 @@ def _validate(ctx: StepContext, chunks: list[Chunk], t: Target) -> StagedObject:
         article_id=ctx.article_id,
         doc_version=ctx.doc_version,
         dimension=t.dimension,
-        max_chunk_tokens=s.max_chunk_tokens,
+        max_chunk_tokens=s.chunking.max_chunk_tokens,
         max_input_tokens=t.profile.input_token_limit,
         normalized=t.normalize,
         model_tokens_exact=t.profile.per_input_tokens,

@@ -1,14 +1,14 @@
-"""Reconciler handler (brief §11), run hourly by EventBridge Scheduler. Every step is idempotent:
+"""Reconciler handler, run hourly by EventBridge Scheduler. Every step is idempotent:
 it only enqueues work (the dispatcher and Claim decide what actually runs) or moves an item whose
 state it re-checks in a conditional write.
 
 1. Expired leases -> re-queue, resuming where the staged output is intact.
-2. FAILED_RETRYABLE past next_retry_at -> re-queue, or after MAX_RETRIES escalate to
+2. FAILED_RETRYABLE past next_retry_at -> re-queue, or after RECONCILE_MAX_RETRIES escalate to
    FAILED_PERMANENT (counted for the process, alert).
-3. STAGED for over 30 minutes -> re-queue from Index.
+3. STAGED for over RECONCILE_STAGED_GRACE_SECONDS (30 minutes) -> re-queue from Index.
 4. Producer articles updated today or yesterday with no LATEST, or other content -> enqueue
    (catches dropped stream events, and a newer version whose run lost the lease).
-5. Open process summaries -> completion check (§6.4).
+5. Open process summaries -> completion check (ingest.status.rollup).
 6. Deletes still pending (their run never handed over) -> queue the REMOVE.
 7. Weekly ({"drift": true}): every table any registry writes (the default one and each
    tenant's) against LATEST (version and chunk count, both ways), each article only against
@@ -31,9 +31,10 @@ from typing import Any
 from aws_lambda_powertools import Logger, Metrics, Tracer
 from aws_lambda_powertools.metrics import MetricUnit
 from aws_lambda_powertools.utilities.typing import LambdaContext
+from entcommon.timeutil import parse_iso
 
 from ingest import aws, events, producer, requeue, telemetry
-from ingest.config import get_settings
+from ingest.config import get_settings, require
 from ingest.errors import IngestStale
 from ingest.models.messages import IngestMessage
 from ingest.models.status import ArticleStatus, RunOutcome, StepName
@@ -48,7 +49,14 @@ logger = Logger()
 tracer = Tracer()
 metrics = Metrics()
 
-MAX_RETRIES = 5
+REQUIRED = (
+    "status_table",
+    "producer_articles_table",
+    "producer_process_table",
+    "queues.ingest_url",
+    "queues.backfill_url",
+    "query_function_name",
+)
 DIGEST_CURSOR = "ALERT#FAILED_DIGEST"
 DIGEST_SAMPLES = 10
 # Statuses of work in flight: their oldest age is the backlog SLO (docs/RUNBOOK.md "SLOs").
@@ -65,8 +73,6 @@ RUNNING = (
 )
 # Waiting on purpose (next_retry_at backs off for hours): published, but not in RUNNING.
 BACKLOG = (*RUNNING, ArticleStatus.FAILED_RETRYABLE)
-STAGED_GRACE_S = 30 * 60
-STREAM_GRACE_S = 5 * 60  # a just-registered article may still be on its way through the Pipe
 _COMPLETE = ("COMPLETE", "COMPLETE_WITH_ERRORS")
 # Settled statuses whose producer row should still exist.
 _GONE_SWEEP = (
@@ -86,6 +92,7 @@ class Reconciler:
         self.messages: dict[str, IngestMessage] = {}
         self.backfill: dict[tuple[str, str], IngestMessage] = {}  # shadow repairs
         self.counts: Counter[str] = Counter()
+        self.config = store.settings.reconcile
 
     def run(self, drift: bool = False) -> dict[str, int]:
         self.backlog()
@@ -101,7 +108,7 @@ class Reconciler:
         self.counts["requeued"] = requeue.enqueue(self.messages.values()) if self.messages else 0
         if self.backfill:
             self.counts["requeued_backfill"] = requeue.enqueue(
-                self.backfill.values(), get_settings().backfill_queue_url
+                self.backfill.values(), get_settings().queues.backfill_url
             )
         self.failed_digest()  # last: includes this run's escalations
         return dict(self.counts)
@@ -124,7 +131,7 @@ class Reconciler:
 
     def _age(self, iso: str) -> int:
         try:
-            since = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            since = parse_iso(iso)
         except ValueError:
             return 0
         return max(0, self.now - int(since.timestamp()))
@@ -208,7 +215,7 @@ class Reconciler:
         for item in self.store.by_status(ArticleStatus.FAILED_RETRYABLE, limit=self.limit):
             if int(item.get("next_retry_at", 0)) > self.now:
                 continue
-            if int(item.get("retry_count", 0)) < MAX_RETRIES:
+            if int(item.get("retry_count", 0)) < self.config.max_retries:
                 self._requeue(str(item["pk"]), "retryable", resume=True)
             else:
                 self._escalate(item)
@@ -231,7 +238,7 @@ class Reconciler:
         complete_process(self.store, process_id)
 
     def stuck_staged(self) -> None:
-        cutoff = iso_at(self.now - STAGED_GRACE_S)
+        cutoff = iso_at(self.now - self.config.staged_grace_seconds)
         for item in self.store.by_status(
             ArticleStatus.STAGED, updated_before=cutoff, limit=self.limit
         ):
@@ -239,7 +246,8 @@ class Reconciler:
 
     def producer_drift(self) -> None:
         today = datetime.fromtimestamp(self.now, UTC).date()
-        recent = iso_at(self.now - STREAM_GRACE_S)
+        # A just-registered article may still be on its way through the Pipe.
+        recent = iso_at(self.now - self.config.stream_grace_seconds)
         for day in (today, today - timedelta(days=1)):
             for row in producer.updated_on(day.isoformat()):
                 if len(self.messages) >= self.limit:
@@ -347,8 +355,8 @@ class Reconciler:
 @tracer.capture_lambda_handler
 @metrics.log_metrics
 def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, int]:
-    settings = get_settings()
-    reconciler = Reconciler(aws.status_store(), now_epoch(), settings.reconcile_batch)
+    settings = require(*REQUIRED)
+    reconciler = Reconciler(aws.status_store(), now_epoch(), settings.reconcile.batch)
     counts = reconciler.run(drift=bool(event.get("drift")))
     for name in ("requeued", "escalated", "processes_completed", "requeued_drift_repair"):
         metrics.add_metric(

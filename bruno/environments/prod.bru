@@ -1,9 +1,11 @@
 vars {
-  producerUrl: https://REPLACE.execute-api.us-west-2.amazonaws.com/prod
-  ingestionUrl: https://REPLACE.execute-api.us-west-2.amazonaws.com/api
-  awsRegion: us-west-2
-  awsProfile: prod
-  source: bruno
-  tenantId: REPLACE
+  producerUrl: {{process.env.PRODUCER_URL}}
+  ingestionUrl: {{process.env.INGESTION_URL}}
+  awsRegion: {{process.env.AWS_REGION}}
+  awsProfile: {{process.env.AWS_PROFILE}}
+  source: {{process.env.BRUNO_SOURCE}}
+  tenantId: {{process.env.BRUNO_TENANT}}
+  liveTable: {{process.env.LIVE_TABLE}}
+  newTable: {{process.env.NEW_TABLE}}
   allowOperations: false
 }

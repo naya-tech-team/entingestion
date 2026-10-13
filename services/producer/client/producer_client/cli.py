@@ -1,4 +1,4 @@
-"""producer-cli: register processes and upload files to the producer API (brief §10)."""
+"""producer-cli: register processes and upload files to the producer API."""
 
 from __future__ import annotations
 

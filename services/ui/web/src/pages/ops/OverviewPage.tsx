@@ -1,6 +1,6 @@
 import { Link } from "react-router";
 import { ErrorBanner, Loading, StatusBadge } from "../../components/common";
-import { useOverview } from "../../components/useOverview";
+import { useOverview } from "../../hooks/useOverview";
 import { formatTime } from "../../format";
 import { OVERVIEW_REFRESH_MS, orderStatuses, QUEUES, queueDepth, relativeAge } from "../../ops";
 import { statusTone } from "../../status";

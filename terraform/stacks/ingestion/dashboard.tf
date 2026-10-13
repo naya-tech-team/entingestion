@@ -1,9 +1,9 @@
-# One CloudWatch dashboard per environment (brief §15 Phase 4): flow, backlog, step latency,
+# One CloudWatch dashboard per environment: flow, backlog, step latency,
 # Bedrock, quality, database and control API. docs/RUNBOOK.md says what to do with each panel.
 
 locals {
   steps       = ["FETCH", "EXTRACT", "NORMALIZE", "CHUNK", "EMBED", "VALIDATE", "INDEX", "FINALIZE"]
-  eval_tables = ["chunks_primary", "chunks_compact"] # vectorstore/targets.py
+  eval_tables = [for name in keys(var.embedding_profiles) : "chunks_${name}"] # one table per profile
   svc         = ["service", "ingestion"]
   sfn         = ["StateMachineArn", module.ingest_workflow.state_machine_arn]
   db_dim      = local.use_aurora ? ["DBClusterIdentifier", one(module.db[*].cluster_id)] : ["DBInstanceIdentifier", one(module.rds[*].instance_id)]

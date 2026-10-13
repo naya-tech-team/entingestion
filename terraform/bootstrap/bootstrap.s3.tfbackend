@@ -1,6 +1,8 @@
-# The bucket and kms_key_id are named after the account (entingestion-tfstate-<account>-<region>,
-# alias/entingestion-tfstate); the Makefile passes them from AWS_ACCOUNT_ID (docs/AWS_ACCESS.md).
+# Used once the state moves into S3 (README.md "Move this stack's state into S3"). The bucket,
+# kms_key_id and region come from the environment on the command line, never this file:
+#   -backend-config=region=$AWS_REGION
+#   -backend-config=bucket=entingestion-tfstate-<account>-<region>
+#   -backend-config=kms_key_id=arn:aws:kms:<region>:<account>:alias/entingestion-tfstate
 key          = "bootstrap/terraform.tfstate"
-region       = "us-west-2"
 encrypt      = true
 use_lockfile = true

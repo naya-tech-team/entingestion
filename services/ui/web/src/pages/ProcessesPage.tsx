@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
-import { api, query } from "../api";
+import { query } from "../api";
 import { ErrorBanner, Loading, StatusBadge } from "../components/common";
 import { formatTime, shortPrincipal } from "../format";
-import type { Process, ProcessPage, SourceAccess, SourcesResponse } from "../types";
+import { usePagedList } from "../hooks/usePagedList";
+import { useSources } from "../hooks/useSources";
+import type { Process } from "../types";
 
 const PAGE_SIZE = 50;
 
@@ -11,56 +13,19 @@ export function ProcessesPage() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const source = params.get("source") ?? "";
-  const [sources, setSources] = useState<SourceAccess[] | null>(null);
-  const [items, setItems] = useState<Process[]>([]);
-  const [nextToken, setNextToken] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    api
-      .get<SourcesResponse>("/api/sources", ctrl.signal)
-      .then((r) => {
-        setSources(r.items);
-        // The list needs a source: default to the first one the caller can read.
-        if (!params.get("source") && r.items[0]) setParams({ source: r.items[0].source }, { replace: true });
-      })
-      .catch((err: unknown) => {
-        if (!ctrl.signal.aborted) setError(err);
-      });
-    return () => ctrl.abort();
-    // Once, on mount.
-  }, []);
-
-  const load = useCallback(
-    async (token: string | null, signal?: AbortSignal) => {
-      if (!source) return;
-      setLoading(true);
-      setError(null);
-      try {
-        const page = await api.get<ProcessPage>(
-          `/api/processes${query({ source, limit: PAGE_SIZE, next_token: token })}`,
-          signal,
-        );
-        setItems((cur) => (token ? [...cur, ...page.items] : page.items));
-        setNextToken(page.next_token);
-      } catch (err) {
-        if (!signal?.aborted) setError(err);
-      } finally {
-        if (!signal?.aborted) setLoading(false);
-      }
-    },
+  const { sources, error: sourcesError } = useSources();
+  const list = usePagedList<Process>(
+    (token) => (source ? `/api/processes${query({ source, limit: PAGE_SIZE, next_token: token })}` : null),
     [source],
   );
+  const { items, nextToken, loading } = list;
+  const error = list.error ?? sourcesError;
 
+  // The list needs a source: default to the first one the caller can read.
   useEffect(() => {
-    const ctrl = new AbortController();
-    setItems([]);
-    setNextToken(null);
-    void load(null, ctrl.signal);
-    return () => ctrl.abort();
-  }, [load]);
+    if (!params.get("source") && sources?.[0]) setParams({ source: sources[0].source }, { replace: true });
+    // Once the sources arrive.
+  }, [sources]);
 
   return (
     <section>
@@ -82,7 +47,7 @@ export function ProcessesPage() {
             ))}
           </select>
         </div>
-        <button type="button" onClick={() => void load(null)} disabled={!source || loading}>
+        <button type="button" onClick={list.reload} disabled={!source || loading}>
           Refresh
         </button>
       </div>
@@ -127,7 +92,7 @@ export function ProcessesPage() {
                     <StatusBadge status={p.status} />
                   </td>
                   <td>{p.settled ? "yes" : "no"}</td>
-                  <td className="num">{p.tickets_issued ?? "-"}</td>
+                  <td className="num">{p.tickets_issued}</td>
                   <td className="num">{p.registered_count}</td>
                   <td className="num">{p.rejected_count}</td>
                   <td>{formatTime(p.created_at)}</td>
@@ -144,7 +109,7 @@ export function ProcessesPage() {
       {loading && <Loading />}
       {nextToken && !loading && (
         <div className="actions">
-          <button type="button" onClick={() => void load(nextToken)}>
+          <button type="button" onClick={list.loadMore}>
             Load more
           </button>
         </div>

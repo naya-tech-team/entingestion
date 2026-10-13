@@ -6,10 +6,11 @@
 #   scripts/build_lambda.sh all
 #
 # Deterministic (same uv.lock + source -> same zip) so Terraform's source_code_hash only moves
-# when code does. Run before `terraform plan`; Terraform never builds code (brief §8.5).
+# when code does. Run before `terraform plan`; Terraform never builds code.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+COMMON="$(cd ../common && pwd)"  # entingestion-common, installed into both packages
 LIMIT_MB=250  # Lambda's unzipped package limit
 # Lambda's python3.12 runtime is Amazon Linux 2023 (glibc 2.34); psycopg-binary and tiktoken only
 # publish aarch64 wheels for manylinux_2_28, so target that rather than manylinux2014.
@@ -20,9 +21,13 @@ build() {
   rm -rf "$out" "dist/$group.zip" && mkdir -p "$out/pkg" dist
 
   # Exactly the versions in uv.lock (what the tests ran against), runtime deps + this group;
-  # every downloaded file is checked against the lock's hashes.
-  uv export --frozen --no-dev --no-emit-project --quiet --extra "$group" > "$out/requirements.txt"
+  # every downloaded file is checked against the lock's hashes. Local path dependencies
+  # (services/common) have no hash, so they're left out and installed without dependencies.
+  uv export --frozen --no-dev --no-emit-project --no-emit-local --quiet --extra "$group" \
+    > "$out/requirements.txt"
   uv pip install --require-hashes -r "$out/requirements.txt" --target "$out/pkg" \
+    --python-platform "$PLATFORM" --python-version 3.12 --quiet
+  uv pip install "$COMMON" --no-deps --target "$out/pkg" \
     --python-platform "$PLATFORM" --python-version 3.12 --quiet
   uv pip install . --no-deps --target "$out/pkg" \
     --python-platform "$PLATFORM" --python-version 3.12 --quiet
@@ -41,9 +46,10 @@ build() {
       ;;
   esac
 
-  # Installer artefacts, caches, and the project's own metadata (it embeds README.md, so doc
-  # edits would otherwise change the code hash).
+  # Installer artefacts, caches, and our projects' metadata (it embeds README.md, so doc edits
+  # would otherwise change the code hash).
   rm -rf "$out/pkg/bin" "$out/pkg/.lock" "$out"/pkg/ingest-*.dist-info
+  rm -rf "$out"/pkg/entingestion_common-*.dist-info
   rm -rf "$out/pkg/pyarrow/tests" "$out/pkg/pyarrow/include"  # never loaded at runtime
   find "$out/pkg" -name "__pycache__" -type d -prune -exec rm -rf {} +
 

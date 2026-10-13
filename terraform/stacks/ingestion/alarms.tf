@@ -1,4 +1,4 @@
-# Alarms (brief §12, SLOs) and the reconciler's hourly failure digest -> one SNS topic (KMS).
+# Alarms (pipeline health and SLOs) and the reconciler's hourly failure digest -> one SNS topic (KMS).
 # Notified on ALARM only (alarm_notify_on_ok); prod refuses to plan without alarm_emails.
 
 locals {
@@ -9,7 +9,7 @@ locals {
   dlqs = {
     ingest   = { queue = module.ingest_queue.dlq_name, what = "Ingest messages the dispatcher couldn't start (unparseable, or still waiting after queue_max_receive_count receives). Redrive: POST /v1/dlq/redrive." }
     backfill = { queue = module.backfill_queue.dlq_name, what = "Backfill messages (reindex, rebuild, drift repairs) that couldn't start. Move them back with an SQS redrive (StartMessageMoveTask)." }
-    pipe     = { queue = aws_sqs_queue.pipe_dlq.name, what = "Stream records the Pipe couldn't deliver. The reconciler re-enqueues from gsi_updated; check the Pipe." }
+    pipe     = { queue = aws_sqs_queue.pipe_dlq.name, what = "Stream records the Pipe couldn't deliver. The reconciler re-enqueues from gsi_updated_shard; check the Pipe." }
   }
   dlq_alarms = merge(
     {
@@ -62,14 +62,6 @@ locals {
       dimensions  = { StateMachineArn = module.ingest_workflow.state_machine_arn }
       statistic   = "Sum"
       threshold   = 1
-    }
-    bedrock-throttled = {
-      description = "Bedrock is throttling embeddings (the default profile's model). Retries absorb bursts; sustained throttling needs a quota increase or fewer live_slots. Shared account: dev load counts against the same quota."
-      namespace   = "AWS/Bedrock"
-      metric_name = "InvocationThrottles"
-      dimensions  = { ModelId = coalesce(local.alarm_embedding_model, "amazon.titan-embed-text-v2:0") }
-      statistic   = "Sum"
-      threshold   = 50
     }
     # SLOs (docs/RUNBOOK.md "SLOs"). Freshness: p95 of stream runs; no stream runs, no data.
     freshness-lag = {
@@ -143,7 +135,7 @@ locals {
     }
   }
 
-  # p95 step duration vs the baseline (brief §12). 3 of 3 five-minute periods, so one large
+  # p95 step duration vs the baseline. 3 of 3 five-minute periods, so one large
   # document doesn't page; no traffic means no data, which isn't breaching.
   step_duration_alarms = {
     for step, ms in var.step_p95_alarm_ms : "step-${lower(step)}-slow" => {
@@ -235,6 +227,19 @@ locals {
     }
   }
   db_alarms = { for name, d in local.db_alarm_defs : name => d.alarm if d.mode == var.database_mode }
+
+  # Bedrock throttling of the default profile's model (or the first Bedrock profile's): none
+  # without a Bedrock profile.
+  bedrock_alarms = {
+    for model in compact([local.alarm_embedding_model]) : "bedrock-throttled" => {
+      description = "Bedrock is throttling embeddings (${model}). Retries absorb bursts; sustained throttling needs a quota increase or fewer live_slots. Shared account: dev load counts against the same quota."
+      namespace   = "AWS/Bedrock"
+      metric_name = "InvocationThrottles"
+      dimensions  = { ModelId = model }
+      statistic   = "Sum"
+      threshold   = 50
+    }
+  }
 }
 
 module "alerts" {
@@ -244,5 +249,5 @@ module "alerts" {
   kms_key_arn     = module.kms.key_arn
   email_endpoints = var.alarm_emails
   notify_on_ok    = var.alarm_notify_on_ok
-  alarms          = merge(local.dlq_alarms, local.pipeline_alarms, local.step_duration_alarms, local.db_alarms)
+  alarms          = merge(local.dlq_alarms, local.pipeline_alarms, local.bedrock_alarms, local.step_duration_alarms, local.db_alarms)
 }

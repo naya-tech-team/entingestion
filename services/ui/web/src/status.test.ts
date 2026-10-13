@@ -23,6 +23,7 @@ function proc(settled: boolean, registered = 3): Process {
     registered_count: registered,
     rejected_count: 0,
     tickets_issued: 3,
+    pending_uploads: 0,
     created_by: "x",
     created_at: "2026-01-01T00:00:00Z",
     settled,

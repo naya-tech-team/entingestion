@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../../api";
 import { ErrorBanner, Loading, Stat } from "../../components/common";
+import { useApi } from "../../hooks/useApi";
 import type { RegistryState, TablesResponse, TableStats } from "../../types";
 
 function num(value: unknown): string {
@@ -18,34 +17,7 @@ function isRecord<T extends object>(value: T | null | undefined): value is T {
 }
 
 export function TablesPage() {
-  const [data, setData] = useState<TablesResponse | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [loading, setLoading] = useState(false);
-  const inFlight = useRef<AbortController | null>(null);
-
-  const load = useCallback(async () => {
-    if (inFlight.current) return;
-    const ctrl = new AbortController();
-    inFlight.current = ctrl;
-    setLoading(true);
-    try {
-      setData(await api.get<TablesResponse>("/api/ops/tables", ctrl.signal));
-      setError(null);
-    } catch (err) {
-      if (ctrl.signal.aborted) return;
-      setError(err);
-    }
-    setLoading(false);
-    inFlight.current = null;
-  }, []);
-
-  useEffect(() => {
-    void load();
-    return () => {
-      inFlight.current?.abort();
-      inFlight.current = null;
-    };
-  }, [load]);
+  const { data, error, loading, reload } = useApi<TablesResponse>("/api/ops/tables");
 
   const registry = isRecord(data?.registry) ? data.registry : null;
   const tenants = isRecord(data?.tenants) ? Object.entries(data.tenants).sort(([a], [b]) => a.localeCompare(b)) : [];
@@ -60,7 +32,7 @@ export function TablesPage() {
           <h1>Vector tables</h1>
           <p className="muted small">Read-only. Switching or retiring tables stays in the CLI.</p>
         </div>
-        <button type="button" onClick={() => void load()} disabled={loading}>
+        <button type="button" onClick={reload} disabled={loading}>
           Refresh
         </button>
       </div>

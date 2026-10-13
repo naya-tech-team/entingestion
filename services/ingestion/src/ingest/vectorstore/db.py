@@ -8,25 +8,22 @@ import psycopg
 from ingest.config import Settings
 
 _CONN: psycopg.Connection[tuple[object, ...]] | None = None
-STATEMENT_TIMEOUT_MS = 30_000
-# IAM token checks on a small burstable instance can take several seconds, mostly when cold.
-CONNECT_TIMEOUT_S = 30
 
 
 def _connect(settings: Settings) -> psycopg.Connection[tuple[object, ...]]:
     token = boto3.client("rds").generate_db_auth_token(
-        DBHostname=settings.db_host, Port=settings.db_port, DBUsername=settings.db_user
+        DBHostname=settings.db.host, Port=settings.db.port, DBUsername=settings.db.user
     )
     return psycopg.connect(
-        host=settings.db_host,
-        port=settings.db_port,
-        dbname=settings.db_name,
-        user=settings.db_user,
+        host=settings.db.host,
+        port=settings.db.port,
+        dbname=settings.db.name,
+        user=settings.db.user,
         password=token,
-        sslmode=settings.db_sslmode,
-        sslrootcert=settings.db_sslrootcert if settings.db_sslmode == "verify-full" else None,
-        connect_timeout=CONNECT_TIMEOUT_S,
-        options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}",
+        sslmode=settings.db.sslmode,
+        sslrootcert=settings.db.sslrootcert if settings.db.sslmode == "verify-full" else None,
+        connect_timeout=settings.db.connect_timeout_seconds,
+        options=f"-c statement_timeout={settings.db.statement_timeout_ms}",
         application_name="ingest",
         # No server-side prepared statements: RDS Proxy would pin the connection.
         prepare_threshold=None,

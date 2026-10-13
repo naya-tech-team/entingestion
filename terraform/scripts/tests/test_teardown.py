@@ -264,6 +264,15 @@ class TeardownTest(unittest.TestCase):
         self.assertEqual((world["state"], world["clusters"], world["tables"]), ([], {}, []))
         self.assertFalse(self.pending.exists())
 
+    def test_every_var_file_reaches_destroy_in_order(self) -> None:
+        self.world([BUCKET])
+        code, out = self.teardown("--var-file", "y.tfvars")
+        self.assertEqual(code, 0, out)
+        self.assertIn(
+            "terraform destroy -input=false -auto-approve -var-file=x.tfvars -var-file=y.tfvars",
+            self.calls(),
+        )
+
     def test_final_snapshot_is_optional(self) -> None:
         self.world(AURORA_STACK, clusters={"ingestion-dev": ["ingestion-dev-1"]})
         code, _ = self.teardown("--final-snapshot")

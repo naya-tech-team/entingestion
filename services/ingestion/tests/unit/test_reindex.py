@@ -1,4 +1,4 @@
-"""Model change and rebuild (brief §7.3, UC9, UC10): per-table targets, the reindex plan and
+"""Model change and rebuild (docs/USE_CASES.md UC9, UC10): per-table targets, the reindex plan and
 batch handlers, the control API routes, and the tables function's view switch."""
 
 from __future__ import annotations
@@ -68,8 +68,8 @@ def test_model_change_reembeds_into_the_new_table_only(env: Env) -> None:
     assert vectors.rows == live_rows  # the live table is untouched
     assert titan.calls > calls  # new model/dimension: no cache hits from the 1024-d vectors
     keys = staged_keys("art_1")
-    assert {"embeddings/vectors.parquet", f"embeddings/{NEW}.parquet"} <= keys
-    assert {"_manifest.json", f"_manifest.{NEW}.json"} <= keys
+    assert {"embeddings/chunks_primary.parquet", f"embeddings/{NEW}.parquet"} <= keys
+    assert {"_manifest.chunks_primary.json", f"_manifest.{NEW}.json"} <= keys
     assert latest("art_1")["status"] == "INDEXED"
     assert summary("prc_A") == {"indexed": 1, "skipped": 0, "failed": 0}  # nothing recounted
 
@@ -252,7 +252,7 @@ def test_enqueue_batch_sends_backfill_messages(env: Env) -> None:
     )
 
     assert out == {"queued": 1, "missing": ["art_gone"]}
-    url = aws.get_settings().backfill_queue_url
+    url = aws.get_settings().queues.backfill_url
     msg = json.loads(
         boto3.client("sqs", region_name=REGION).receive_message(QueueUrl=url)["Messages"][0]["Body"]
     )
@@ -270,7 +270,7 @@ class FakeSfn:
     def start_execution(self, **kwargs: Any) -> dict[str, str]:
         self.started.append(kwargs)
         return {
-            "executionArn": f"arn:aws:states:us-west-2:123456789012:execution:r:{kwargs['name']}"
+            "executionArn": f"arn:aws:states:{REGION}:123456789012:execution:r:{kwargs['name']}"
         }
 
 
@@ -433,3 +433,13 @@ def test_active_table_is_read_from_the_view_definition() -> None:
             )
 
     assert active_table(Conn()) == NEW  # type: ignore[arg-type]
+
+
+def test_migrate_reads_the_live_table_a_change_recorded(env: Env) -> None:
+    from ingest.vectorstore import registry
+
+    store = aws.status_store()
+    assert registry.recorded_live(store) is None  # a new environment: nothing recorded yet
+    registry.add_write(store, NEW, "test")
+    registry.set_live(store, NEW, "test")
+    assert registry.recorded_live(store) == NEW

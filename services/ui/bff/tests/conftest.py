@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import os
 import socket
 import threading
 from collections.abc import Callable, Iterator
@@ -10,9 +11,21 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+import botocore.session
 import pytest
 
-REGION = "us-west-2"
+
+def _test_region() -> str:
+    """The region the tests run in, from the environment: AWS_REGION, else AWS_DEFAULT_REGION,
+    else the AWS config's region. moto works in any region; nothing here names one."""
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    region = region or botocore.session.get_session().get_config_variable("region")
+    if not region:
+        raise RuntimeError("set AWS_REGION (or AWS_DEFAULT_REGION) to run the tests")
+    return region
+
+
+REGION = _test_region()
 
 
 @dataclass
@@ -113,9 +126,26 @@ def env(monkeypatch: pytest.MonkeyPatch, producer: FakeApi, control: FakeApi) ->
     monkeypatch.setenv("POWERTOOLS_SERVICE_NAME", "ui-bff")
     monkeypatch.setenv("PRODUCER_API_URL", producer.url)
     monkeypatch.setenv("CONTROL_API_URL", control.url)
-    from bff import upstream
+    from bff import config, upstream
 
     upstream._session.cache_clear()
+    config.get_settings.cache_clear()
+
+
+@pytest.fixture
+def setenv(monkeypatch: pytest.MonkeyPatch) -> SetEnv:
+    """Change the function's environment mid-test (the settings are read once, then cached)."""
+    from bff import config
+
+    def _set(**values: str | None) -> None:
+        for name, value in values.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        config.get_settings.cache_clear()
+
+    return _set
 
 
 def closed_port_url() -> str:
@@ -129,7 +159,7 @@ def closed_port_url() -> str:
 class Context:
     function_name = "ui-test-bff"
     memory_limit_in_mb = 256
-    invoked_function_arn = "arn:aws:lambda:us-west-2:123456789012:function:ui-test-bff"
+    invoked_function_arn = f"arn:aws:lambda:{REGION}:123456789012:function:ui-test-bff"
     aws_request_id = "req-1"
 
 
@@ -159,7 +189,7 @@ def make_event(
         "requestContext": {
             "accountId": "123456789012",
             "apiId": "fnurl",
-            "domainName": "fnurl.lambda-url.us-west-2.on.aws",
+            "domainName": f"fnurl.lambda-url.{REGION}.on.aws",
             "domainPrefix": "fnurl",
             "http": {
                 "method": method,
@@ -184,6 +214,7 @@ def make_event(
 
 
 Invoke = Callable[..., dict[str, Any]]
+SetEnv = Callable[..., None]
 
 
 @pytest.fixture

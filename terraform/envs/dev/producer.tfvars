@@ -1,17 +1,7 @@
 # producer stack, dev. Code: terraform/stacks/producer. Usage: make plan ENV=dev STACK=producer
+# Region and mandatory tags: envs/dev/common.tfvars.
 
-env    = "dev"
-region = "us-west-2"
-
-mandatory_tags = {
-  created_by           = "naveen"
-  created_date         = "2026-10-10"
-  owner                = "naveen"
-  internal_client_code = "TBD" # placeholder: replace with the real value
-  client               = "TBD" # placeholder: replace with the real value
-  project_name         = "entingestion"
-  division             = "TBD" # placeholder: replace with the real value
-}
+env = "dev"
 
 # dev shares the account with prod, so its tables are prefixed.
 table_prefix = "dev-"
@@ -26,8 +16,10 @@ lambda_zip_path = "../../../services/producer/dist/producer_lambda.zip"
 log_retention_days = 30
 log_level          = "DEBUG"
 
-# The account already has an API Gateway CloudWatch role (hr-apigw-cloudwatch-dev); don't replace it.
-manage_apigw_account = false
+# API Gateway's CloudWatch Logs role is an account-wide setting per region: exactly one stack in
+# the account and region owns it. Dev's producer does here (the account had none set); set false
+# where the account already has one.
+manage_apigw_account = true
 
 # WAF: the stack creates one ACL per environment (set waf_acl_arn to use a shared ACL instead).
 waf_rate_limit = 2000
@@ -36,9 +28,10 @@ waf_rate_limit = 2000
 alarm_emails = []
 
 # AWS Backup and cross-region copies are prod-only (not on the free plan).
-backup_enabled = false
+backup_enabled     = false
+backup_copy_region = null
 
-# Who may use which source (review C3). One tenant in dev. Principals are written relative to the
+# Who may use which source. One tenant in dev. Principals are written relative to the
 # account ("role/<name>", "user/<name>"); the stack prefixes arn:<partition>:iam::<AWS_ACCOUNT_ID>:.
 # People (Bruno, the CLI, acceptance scripts) aren't named here: they come from the environment,
 # OPERATOR_PRINCIPALS=user/<you> (make), and write every source.
@@ -62,7 +55,6 @@ source_access = {
 
 # Raw object versions: dev keeps noncurrent versions only as long as Glacier IR's minimum needs.
 raw_noncurrent_expiration_days = 120
-
 
 # The workload boundary policy comes with the bootstrap apply (terraform/bootstrap/access.tf),
 # which waits for `aws login`. Until then dev roles are created without it; set true after.

@@ -1,42 +1,33 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
 import { api } from "../../api";
 import { ErrorBanner, Loading } from "../../components/common";
+import { RequestSlot, runInSlot } from "../../hooks/request";
+import { useSources } from "../../hooks/useSources";
 import { buildSearchRequest, DEFAULT_K, distinctTenants, formatScore, MAX_K, MAX_QUERY_CHARS, MIN_K, truncate } from "../../ops";
-import type { SearchResponse, SourcesResponse } from "../../types";
+import type { SearchResponse } from "../../types";
 
 function rank(value: number | null | undefined): string {
   return typeof value === "number" ? String(value) : "-";
 }
 
 export function SearchPage() {
-  const [tenants, setTenants] = useState<string[] | null>(null);
+  const { sources, error: sourcesError } = useSources();
+  const tenants = useMemo(() => (sources ? distinctTenants(sources) : null), [sources]);
   const [tenant, setTenant] = useState("");
   const [queryText, setQueryText] = useState("");
   const [kText, setKText] = useState(String(DEFAULT_K));
   const [formError, setFormError] = useState<string | null>(null);
-  const [error, setError] = useState<unknown>(null);
+  const [searchError, setSearchError] = useState<unknown>(null);
   const [loading, setLoading] = useState(false);
   const [response, setResponse] = useState<SearchResponse | null>(null);
-  const inFlight = useRef<AbortController | null>(null);
+  const [slot] = useState(() => new RequestSlot());
+  const error = searchError ?? sourcesError;
 
   useEffect(() => {
-    const ctrl = new AbortController();
-    api
-      .get<SourcesResponse>("/api/sources", ctrl.signal)
-      .then((r) => {
-        const list = distinctTenants(r.items);
-        setTenants(list);
-        setTenant((cur) => cur || list[0] || "");
-      })
-      .catch((err: unknown) => {
-        if (!ctrl.signal.aborted) setError(err);
-      });
-    return () => {
-      ctrl.abort();
-      inFlight.current?.abort();
-    };
-  }, []);
+    if (tenants) setTenant((cur) => cur || tenants[0] || "");
+  }, [tenants]);
+  useEffect(() => () => slot.abort(), [slot]);
 
   async function onSubmit(ev: FormEvent<HTMLFormElement>) {
     ev.preventDefault();
@@ -46,20 +37,22 @@ export function SearchPage() {
       return;
     }
     setFormError(null);
-    inFlight.current?.abort();
-    const ctrl = new AbortController();
-    inFlight.current = ctrl;
-    setLoading(true);
-    setError(null);
-    try {
-      setResponse(await api.post<SearchResponse>("/api/ops/search", req.value, ctrl.signal));
-    } catch (err) {
-      if (ctrl.signal.aborted) return;
-      setError(err);
+    // A new search replaces the one in flight.
+    const outcome = await runInSlot(slot, (signal) => api.post<SearchResponse>("/api/ops/search", req.value, signal), {
+      replace: true,
+      onStart: () => {
+        setLoading(true);
+        setSearchError(null);
+      },
+    });
+    if (!outcome) return;
+    if (outcome.ok) {
+      setResponse(outcome.value);
+    } else {
+      setSearchError(outcome.error);
       setResponse(null);
     }
     setLoading(false);
-    inFlight.current = null;
   }
 
   const results = response?.results ?? [];

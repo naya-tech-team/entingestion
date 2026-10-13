@@ -84,7 +84,7 @@ resource "aws_api_gateway_deployment" "this" {
 # ---------------------------------------------------------------------------
 
 resource "aws_cloudwatch_log_group" "access" {
-  #checkov:skip=CKV_AWS_338:Retention is set per environment (brief §7.3: 30 days dev, 90 days prod).
+  #checkov:skip=CKV_AWS_338:Retention is set per environment (log_retention_days: 30 days dev, 90 days prod).
   name              = "/aws/apigateway/${var.name}/${var.stage_name}/access"
   retention_in_days = var.log_retention_days
   kms_key_id        = var.log_kms_key_arn
@@ -92,7 +92,7 @@ resource "aws_cloudwatch_log_group" "access" {
 
 # API Gateway writes execution logs to this fixed name; pre-creating it sets retention and KMS.
 resource "aws_cloudwatch_log_group" "execution" {
-  #checkov:skip=CKV_AWS_338:Retention is set per environment (brief §7.3: 30 days dev, 90 days prod).
+  #checkov:skip=CKV_AWS_338:Retention is set per environment (log_retention_days: 30 days dev, 90 days prod).
   name              = "API-Gateway-Execution-Logs_${aws_api_gateway_rest_api.this.id}/${var.stage_name}"
   retention_in_days = var.log_retention_days
   kms_key_id        = var.log_kms_key_arn
@@ -120,7 +120,7 @@ data "aws_iam_policy_document" "apigw_assume" {
 
 resource "aws_iam_role" "apigw_cloudwatch" {
   count                = var.manage_apigw_account ? 1 : 0
-  name                 = "apigateway-cloudwatch-logs"
+  name                 = "${var.name}-apigw-logs" # in the stack's role namespace (deploy boundary)
   assume_role_policy   = data.aws_iam_policy_document.apigw_assume[0].json
   permissions_boundary = var.permissions_boundary
 }

@@ -1,9 +1,11 @@
 vars {
-  producerUrl: https://o3jxcir675.execute-api.us-west-2.amazonaws.com/prod
-  ingestionUrl: https://1vcpm1cwu7.execute-api.us-west-2.amazonaws.com/api
-  awsRegion: us-west-2
-  awsProfile: default
-  source: bruno
-  tenantId: internal
+  producerUrl: {{process.env.PRODUCER_URL}}
+  ingestionUrl: {{process.env.INGESTION_URL}}
+  awsRegion: {{process.env.AWS_REGION}}
+  awsProfile: {{process.env.AWS_PROFILE}}
+  source: {{process.env.BRUNO_SOURCE}}
+  tenantId: {{process.env.BRUNO_TENANT}}
+  liveTable: {{process.env.LIVE_TABLE}}
+  newTable: {{process.env.NEW_TABLE}}
   allowOperations: false
 }

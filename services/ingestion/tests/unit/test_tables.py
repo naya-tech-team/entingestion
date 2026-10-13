@@ -44,7 +44,8 @@ class RecordingConn:
 
 
 @pytest.fixture(autouse=True)
-def fresh_settings() -> Iterator[None]:
+def fresh_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("DB_HOST", "db.test.invalid")  # the tables and query functions need one
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -109,8 +110,7 @@ def test_migrate_no_longer_switches_tables(action: str) -> None:
         migrate.handler({"action": action, "table": "chunks_compact"}, FakeContext())
 
 
-def test_truncate_is_refused_when_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ALLOW_TRUNCATE", "false")
+def test_truncate_is_refused_unless_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(migrate.boto3, "client", lambda *a, **k: pytest.fail("no secret read"))
     event = {"action": "truncate", "table": "chunks_compact", "confirm": "chunks_compact"}
 
@@ -119,13 +119,41 @@ def test_truncate_is_refused_when_switched_off(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_truncate_needs_confirmation_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ALLOW_TRUNCATE", "true")
     monkeypatch.setattr(migrate.boto3, "client", lambda *a, **k: pytest.fail("no secret read"))
     with pytest.raises(ValueError, match="confirm"):
         migrate.handler({"action": "truncate", "table": "chunks_compact"}, FakeContext())
 
 
-def test_truncate_is_allowed_by_default() -> None:
-    assert get_settings().allow_truncate
+def test_switches_are_off_unless_set() -> None:
+    settings = get_settings()
+    assert not settings.allow_truncate
+    assert not settings.ocr.enabled
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("true", True), ("TRUE", True), ("1", True), ("false", False), ("", False)],
+)
+def test_switches_read_the_same_everywhere(
+    monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool
+) -> None:
+    for name in ("ALLOW_TRUNCATE", "OCR_ENABLED", "PII_SCREENING", "RERANK_ENABLED"):
+        monkeypatch.setenv(name, raw)
+    get_settings.cache_clear()
+    s = get_settings()
+    assert (s.allow_truncate, s.ocr.enabled, s.pii.screening, s.search.rerank_enabled) == (
+        expected,
+    ) * 4
+
+
+def test_a_bad_switch_is_a_configuration_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ingest.config import MissingSetting
+
+    monkeypatch.setenv("OCR_ENABLED", "maybe")
+    get_settings.cache_clear()
+    with pytest.raises(MissingSetting, match="OCR_ENABLED must be true or false"):
+        get_settings()
 
 
 # -- query function: which actions see every tenant ----------------------------------------
@@ -149,3 +177,22 @@ def test_only_internal_query_actions_read_every_tenant(monkeypatch: pytest.Monke
 
     with pytest.raises(ValueError, match="tenant"):
         query.handler(event | {"tenant_id": ""}, FakeContext())  # type: ignore[arg-type]
+
+
+# -- required settings ------------------------------------------------------------------------
+
+
+def test_a_handler_names_the_settings_it_lacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ingest import dispatcher, query
+    from ingest.config import MissingSetting
+
+    monkeypatch.delenv("DB_HOST")
+    monkeypatch.delenv("STATE_MACHINE_ARN", raising=False)
+    monkeypatch.delenv("STATUS_TABLE", raising=False)
+    get_settings.cache_clear()
+    monkeypatch.setattr(query, "connection", lambda settings: pytest.fail("no connection"))
+
+    with pytest.raises(MissingSetting, match=r"missing settings: db\.host"):
+        query.handler({"action": "counts"}, FakeContext())  # type: ignore[arg-type]
+    with pytest.raises(MissingSetting, match="status_table, state_machine_arn"):
+        dispatcher.handler({"Records": []}, FakeContext())  # type: ignore[arg-type]

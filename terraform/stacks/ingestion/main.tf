@@ -6,24 +6,8 @@ module "kms" {
   alias       = local.name_prefix
   description = "Ingestion (${var.env}): status/cache tables, staging, logs, database, workflow."
 
-  policy_statements = [
-    {
-      sid        = "CloudWatchLogsEncryption"
-      actions    = ["kms:Encrypt*", "kms:Decrypt*", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"]
-      principals = [{ type = "Service", identifiers = ["logs.${local.region}.amazonaws.com"] }]
-      conditions = [{
-        test     = "ArnLike"
-        variable = "kms:EncryptionContext:aws:logs:arn"
-        values   = ["arn:${local.partition}:logs:${local.region}:${local.account_id}:log-group:*"]
-      }]
-    },
-    {
-      sid        = "CloudWatchAlarmsToEncryptedTopic"
-      actions    = ["kms:Decrypt", "kms:GenerateDataKey*"]
-      principals = [{ type = "Service", identifiers = ["cloudwatch.amazonaws.com"] }]
-      conditions = [{ test = "StringEquals", variable = "aws:SourceAccount", values = [local.account_id] }]
-    },
-  ]
+  allow_cloudwatch_logs         = true # the stack's log groups
+  allow_cloudwatch_alarms_topic = true # the alerts topic
 }
 
 module "staging" {
@@ -42,7 +26,7 @@ module "staging" {
       noncurrent_version_expiration_days     = var.staging_noncurrent_expiration_days
     },
     {
-      # Temp keys from interrupted writes (brief §5: write to _tmp, then copy).
+      # Temp keys from interrupted writes (staged files are written to _tmp, then copied).
       id              = "tmp"
       prefix          = "_tmp/"
       expiration_days = 1
@@ -64,7 +48,7 @@ locals {
   ]
 }
 
-# Single-table status store (brief §6): LATEST, RUN#, RUN#..#STEP#, PROCESS# items.
+# Single-table status store: LATEST, RUN#, RUN#..#STEP#, PROCESS# items.
 module "status_table" {
   source = "../../modules/dynamodb_table"
 
@@ -100,15 +84,11 @@ module "cache_table" {
   deletion_protection = local.is_prod
 }
 
-locals {
-  dispatcher_timeout = 60
-}
-
 module "ingest_queue" {
   source = "../../modules/sqs_queue"
 
   name                       = "${local.name_prefix}-ingest"
-  visibility_timeout_seconds = 6 * local.dispatcher_timeout
+  visibility_timeout_seconds = 6 * var.dispatcher_timeout
   max_receive_count          = var.queue_max_receive_count # records waiting for a slot are received often
 }
 
@@ -116,7 +96,7 @@ module "backfill_queue" {
   source = "../../modules/sqs_queue"
 
   name                       = "${local.name_prefix}-backfill"
-  visibility_timeout_seconds = 6 * local.dispatcher_timeout
+  visibility_timeout_seconds = 6 * var.dispatcher_timeout
   max_receive_count          = var.queue_max_receive_count # records waiting for a slot are received often
 }
 

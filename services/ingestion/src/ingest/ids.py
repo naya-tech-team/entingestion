@@ -1,4 +1,4 @@
-"""Identifiers and keys (brief §4.3, §4.4, §5)."""
+"""Identifiers and keys: run ids, execution names, chunk ids, cache keys and staged file names."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def execution_name(
     90 days, so StartExecution with the same name is the idempotency check: the same stream
     record delivered 3x starts one execution. process_id and source_updated_at are part of the
     key so an unchanged article joining another process, or a PATCH, still gets its own run
-    (counted as SKIPPED_UNCHANGED, brief UC3/UC11). Replays append -r<run suffix>.
+    (counted as SKIPPED_UNCHANGED, docs/USE_CASES.md UC3/UC11). Replays append -r<run suffix>.
     """
     key = f"{content_sha256}|{process_id}|{source_updated_at}|{pipeline_version}"
     digest = hashlib.sha256(key.encode()).hexdigest()[:32]
@@ -80,10 +80,20 @@ def staging_prefix(article_id: str, doc_version: int) -> str:
     return f"{article_id}/v{doc_version}/"
 
 
+# Staged files under a version's prefix that every vector table shares. Embed and Validate stage
+# one file per table: vectors_file() and manifest_file().
 STAGING_FILES = {
     "EXTRACT": "extracted/content.json",
     "NORMALIZE": "normalized/document.json",
     "CHUNK": "chunks/chunks.jsonl",
-    "EMBED": "embeddings/vectors.parquet",
-    "VALIDATE": "_manifest.json",
 }
+
+
+def vectors_file(table: str) -> str:
+    """Embed's output for one vector table."""
+    return f"embeddings/{table}.parquet"
+
+
+def manifest_file(table: str) -> str:
+    """Validate's manifest for one vector table: Index loads only what it passed."""
+    return f"_manifest.{table}.json"

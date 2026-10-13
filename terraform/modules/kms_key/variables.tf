@@ -42,9 +42,9 @@ variable "admin_principals" {
 
 variable "policy_statements" {
   description = <<-EOT
-    Extra key policy statements, appended after the default statement that lets the account
-    manage the key through IAM. Use these for service principals that act without an IAM role
-    (for example CloudWatch Logs or CloudWatch alarms publishing to an encrypted SNS topic).
+    Extra key policy statements, appended after the account statements and the CloudWatch ones
+    (allow_cloudwatch_logs, allow_cloudwatch_alarms_topic). Use these for other service
+    principals that act without an IAM role.
   EOT
   type = list(object({
     sid     = string
@@ -60,4 +60,16 @@ variable "policy_statements" {
     })), [])
   }))
   default = []
+}
+
+variable "allow_cloudwatch_logs" {
+  description = "Let CloudWatch Logs encrypt this account's log groups in this region with the key (statement CloudWatchLogsEncryption)."
+  type        = bool
+  default     = false
+}
+
+variable "allow_cloudwatch_alarms_topic" {
+  description = "Let CloudWatch alarms of this account publish to an SNS topic encrypted with the key (statement CloudWatchAlarmsToEncryptedTopic)."
+  type        = bool
+  default     = false
 }

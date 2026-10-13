@@ -1,11 +1,12 @@
-"""MarkFailed (brief §6.3 step 5): the state machine's Catch target.
+"""MarkFailed: the state machine's Catch target, the last write of a run that failed.
 
 - IngestSkip (e.g. no text)                -> SKIPPED, terminal, counted as skipped
 - throttling after retries                 -> FAILED_RETRYABLE on its own budget (throttle_count,
-                                              MAX_THROTTLED): a busy account doesn't use up the
-                                              retries meant for real failures
+                                              RETRY_MAX_THROTTLED): a busy account doesn't use up
+                                              the retries meant for real failures
 - other transient after retries (timeouts) -> FAILED_RETRYABLE with next_retry_at; the reconciler
-                                              re-queues, and after 5 tries it's FAILED_PERMANENT
+                                              re-queues, and after RETRY_MAX_RETRYABLE tries it's
+                                              FAILED_PERMANENT
 - everything else                          -> FAILED_PERMANENT, terminal, replayable
 
 Permanent failures are counted (ArticlesFailedPermanent by error_code, which the alarms watch)
@@ -21,6 +22,7 @@ from aws_lambda_powertools.metrics import MetricUnit
 from aws_lambda_powertools.utilities.typing import LambdaContext
 
 from ingest import aws, telemetry
+from ingest.config import get_settings, require
 from ingest.errors import DeletePending, ErrorCode, IngestStale, parse_cause
 from ingest.models.status import ArticleStatus, RunOutcome
 from ingest.status import keys
@@ -44,11 +46,8 @@ TRANSIENT = frozenset(
         "States.Timeout",
     }
 )
-MAX_RETRYABLE = 5
-MAX_THROTTLED = 20
+REQUIRED = ("status_table", "producer_process_table")
 _FINISHED = frozenset({RunOutcome.INDEXED.value, RunOutcome.DELETED.value})
-BASE_RETRY_SECONDS = 900
-THROTTLE_RETRY_SECONDS = 300
 # Errors raised by Step Functions or Lambda itself carry no IngestError JSON in their cause.
 _CODE_BY_NAME = {
     "States.Timeout": ErrorCode.TIMEOUT.value,
@@ -63,6 +62,7 @@ _CODE_BY_NAME = {
 @tracer.capture_lambda_handler
 @metrics.log_metrics
 def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+    require(*REQUIRED)
     ctx = event["ctx"]
     error = event.get("error") or {}
     name = str(error.get("Error", "States.TaskFailed"))
@@ -116,25 +116,27 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
 
 def _settle(store: Any, ref: StepRef, name: str, code: str, detail: str) -> str:
     error_sets = {"error_class": "permanent", "error_code": code, "error_msg": detail}
+    budget = get_settings().retry
     if name == "IngestSkip":
         store.finish(ref, ArticleStatus.SKIPPED, RunOutcome.SKIPPED, {"skip_reason": code})
         return RunOutcome.SKIPPED.value
     if name in THROTTLED:
         latest = store.latest(ref.article_id) or {}
         throttled = int(latest.get("throttle_count", 0))
-        if throttled + 1 < MAX_THROTTLED:
-            backoff = THROTTLE_RETRY_SECONDS * 2 ** min(throttled, 3)  # 5, 10, 20, 40 min
+        if throttled + 1 < budget.max_throttled:
+            backoff = budget.throttle_seconds * 2 ** min(throttled, 3)  # 5, 10, 20, 40 min
             store.mark_retryable(ref, code, detail, now_epoch() + backoff, counter="throttle_count")
             return RunOutcome.FAILED_RETRYABLE.value
-        detail = f"gave up after {MAX_THROTTLED} throttled runs: {detail}"
+        detail = f"gave up after {budget.max_throttled} throttled runs: {detail}"
         error_sets |= {"error_msg": detail[:1024]}
     elif name in TRANSIENT:
         latest = store.latest(ref.article_id) or {}
         retries = int(latest.get("retry_count", 0))
-        if retries + 1 < MAX_RETRYABLE:
-            store.mark_retryable(ref, code, detail, now_epoch() + BASE_RETRY_SECONDS * 2**retries)
+        if retries + 1 < budget.max_retryable:
+            next_at = now_epoch() + budget.base_seconds * 2**retries
+            store.mark_retryable(ref, code, detail, next_at)
             return RunOutcome.FAILED_RETRYABLE.value
-        detail = f"gave up after {MAX_RETRYABLE} retryable failures: {detail}"
+        detail = f"gave up after {budget.max_retryable} retryable failures: {detail}"
         error_sets |= {"error_msg": detail[:1024]}
     store.finish(ref, ArticleStatus.FAILED_PERMANENT, RunOutcome.FAILED_PERMANENT, error_sets)
     return RunOutcome.FAILED_PERMANENT.value

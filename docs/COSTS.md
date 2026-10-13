@@ -1,6 +1,6 @@
 # What an environment costs
 
-What each environment costs when it's idle (deployed, no documents arriving), and what grows with traffic. Prices are approximate us-west-2 on-demand list prices; check the AWS pricing pages before you budget, and Cost Explorer (tag `env`) for the real bill.
+What each environment costs when it's idle (deployed, no documents arriving), and what grows with traffic. Prices are approximate on-demand list prices for us-west-2 (the region in the tracked `common.tfvars`; other regions differ); check the AWS pricing pages before you budget, and Cost Explorer (tag `env`) for the real bill.
 
 ## Idle, per month
 
@@ -13,9 +13,9 @@ What each environment costs when it's idle (deployed, no documents arriving), an
 | CloudWatch | ~45 alarms (~$5; metric math alarms bill per metric), 1 dashboard (~$3), custom metrics published every hour (backlog per status, ~25: ~$8) | the same | Metrics cost only in months they're published; the reconciler publishes the backlog hourly |
 | VPC flow logs | < $1 (little traffic) | < $1 | $0.50 per GB ingested |
 | CloudTrail | management events: free (first trail); data events on the state bucket only: cents | the same | Data events are $0.10 per 100,000; only the state bucket and listed buckets are logged |
-| KMS keys | 2 (ingestion, producer): $2 | 4 (+ the 2 backup copy keys in us-east-2): $4 | $1 per key per month; the state and trail keys are shared ($2) |
+| KMS keys | 2 (ingestion, producer): $2 | 4 (+ the 2 backup copy keys in `backup_copy_region`): $4 | $1 per key per month; the state and trail keys are shared ($2) |
 | Secrets Manager | the RDS-managed master secret: $0.40 | $0.40 | |
-| AWS Backup | none (`backup_enabled = false`) | a few dollars at small data: DynamoDB backups $0.10/GB-month, Aurora snapshots $0.021/GB-month, plus $0.02/GB copied to us-east-2 each day | Prod only |
+| AWS Backup | none (`backup_enabled = false`) | a few dollars at small data: DynamoDB backups $0.10/GB-month, Aurora snapshots $0.021/GB-month, plus $0.02/GB copied to `backup_copy_region` (us-east-2 in the prod tfvars) each day | Prod only |
 | DynamoDB, S3, Lambda, Step Functions, SQS, EventBridge, Scheduler | ~$1 (storage, PITR, the hourly reconciler) | ~$1 plus storage | On-demand; idle costs only storage |
 | Upload UI ([UI.md](UI.md)) | ~$0 | ~$0 at idle; a WAF web ACL (~$6-8) once added, a prod prerequisite | See the line items below |
 | **Total, idle** | **~$35-50** (less while free-tier credits last) | **~$230 + storage** | |
@@ -37,7 +37,7 @@ The two biggest prod items are fixed minimums: Aurora's 0.5 ACU per instance and
 
 ## Per document
 
-Dominated by Bedrock: Titan Text Embeddings v2 is $0.02 per million input tokens, so an article of 5,000 tokens costs about $0.0001 to embed (the embedding cache makes re-runs of unchanged chunks free). Then about 12 Step Functions state transitions ($0.0003), ~12 Lambda invocations, a dozen DynamoDB writes, and the staged files in S3 (kept while the article exists; older versions expire). OCR (Textract `AnalyzeDocument` with layout and tables) is far more: about $0.02 per page, so scanned PDFs dominate any bill they're in. Reranking (`rerank_enabled`) is billed per search query.
+Dominated by the embedding model. With the tracked profiles (Titan Text Embeddings v2 on Bedrock, $0.02 per million input tokens), an article of 5,000 tokens costs about $0.0001 to embed (the embedding cache makes re-runs of unchanged chunks free). Then about 12 Step Functions state transitions ($0.0003), ~12 Lambda invocations, a dozen DynamoDB writes, and the staged files in S3 (kept while the article exists; older versions expire). OCR (Textract `AnalyzeDocument` with layout and tables) is far more: about $0.02 per page, so scanned PDFs dominate any bill they're in. Reranking (`rerank_enabled`) is billed per search query.
 
 ## Dev on the AWS free plan
 

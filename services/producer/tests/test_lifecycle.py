@@ -1,4 +1,4 @@
-"""Settlement, ordering, deletes and the janitor (review M2.2)."""
+"""Settlement, ordering, deletes and the janitor."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from tests.test_registrar import (
     process,
     put_with_ticket,
     s3_event,
-    table,
     ticket,
     upload,
 )
@@ -192,21 +191,20 @@ def test_a_process_keeps_listing_articles_that_moved_on(api: ApiCall) -> None:
 
 
 @pytest.fixture
-def janitor(api: ApiCall) -> Any:
-    import os
-
+def janitor(api: ApiCall, monkeypatch: pytest.MonkeyPatch) -> Any:
     from producer.config import get_settings
     from producer.janitor import Janitor
     from producer.repository import Repository
 
     sqs = boto3.client("sqs", region_name=REGION)
     url = sqs.create_queue(QueueName="registrar")["QueueUrl"]
-    os.environ["REGISTRAR_QUEUE_URL"] = url
+    monkeypatch.setenv("REGISTRAR_QUEUE_URL", url)
+    get_settings.cache_clear()
     settings = get_settings()
     repo = Repository.from_names(
         settings.process_table, settings.articles_table, settings.uploads_table
     )
-    return Janitor(settings, repo, s3(), sqs, queue_url=url, idle_days=7), sqs, url
+    return Janitor(settings, repo, s3(), sqs), sqs, url
 
 
 def later(hours: float) -> Any:
@@ -230,6 +228,19 @@ def test_janitor_expires_tickets_that_were_never_used(api: ApiCall, janitor: Any
     p = process(pid)
     assert (int(p["pending_uploads"]), int(p["expired_count"])) == (0, 1)
     assert settled(api, pid)
+
+
+def test_the_ticket_grace_period_is_configurable(api: ApiCall, janitor: Any) -> None:
+    from dataclasses import replace
+
+    from producer.janitor import Janitor
+
+    jan, _, _ = janitor
+    quick = Janitor(replace(jan.settings, ticket_grace_seconds=60), jan.repo, jan.s3, jan.sqs)
+    t = ticket(api, new_process(api))
+
+    assert quick.run(later(0.5)) == {"expired": 1}  # the 15-minute URL plus a minute
+    assert upload(t["upload_id"])["status"] == "EXPIRED"
 
 
 def test_janitor_resends_objects_whose_event_was_lost(api: ApiCall, janitor: Any) -> None:
@@ -262,12 +273,3 @@ def test_janitor_closes_idle_open_processes(api: ApiCall, janitor: Any) -> None:
 
 def s3() -> Any:
     return boto3.client("s3", region_name=REGION)
-
-
-def test_legacy_processes_settle_by_the_old_rule() -> None:
-    from producer.models import is_settled
-
-    legacy = {"status": "CLOSED", "expected_count": 2, "registered_count": 1, "rejected_count": 1}
-    assert is_settled(legacy)
-    assert not is_settled(legacy | {"tickets_issued": 3, "pending_uploads": 1})
-    assert table  # imported for symmetry with test_registrar helpers

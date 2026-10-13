@@ -1,26 +1,30 @@
-"""migrate Lambda: apply db/migrations in order (brief §8.5). Invoked by CI after apply:
+"""migrate Lambda: bring the database to the current schema (`make migrate` invokes it after
+an apply):
 
-    aws lambda invoke --function-name <prefix>-migrate /dev/stdout
+1. db/migrations in order (ingest.vectorstore.migrations): the extension, the IAM-auth users
+   every other function connects as, and the tables and roles shared by all vector tables;
+2. a vector table for every embedding profile that has none yet
+   (ingest.vectorstore.profile_tables);
+3. chunks_active recreated over the default registry's live table: the table it already serves
+   (the switch keeps the two in step), or on a new database the default profile's table.
 
 Runs as the cluster's master user (credentials from Secrets Manager), directly against the
-writer endpoint: the first migration creates the extension and the IAM-auth users that every
-other function connects as through RDS Proxy. After the numbered migrations it creates the table
-of every embedding profile that has none yet (ingest.vectorstore.profile_tables).
+writer endpoint.
 
 The same function empties a vector table for the rebuild test (UC10), unless ALLOW_TRUNCATE is
 false (prod):
 
     {"action": "truncate", "table": "...", "confirm": "..."}   confirm == table
 
-The vector-table status and switch (brief §7.3) run in the tables function as ingest_ops
-(ingest.tables); status(), activate() and active_table() here are shared with it.
+The vector-table status and switch run in the tables function as ingest_ops (ingest.tables);
+status(), activate() and active_table() here are shared with it.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -30,19 +34,24 @@ from aws_lambda_powertools import Logger
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from psycopg import sql
 
+from ingest import aws
 from ingest.config import get_settings
+from ingest.embedding.profiles import EmbeddingProfile
 from ingest.vectorstore import migrations, profile_tables
+from ingest.vectorstore import registry as vector_registry
 from ingest.vectorstore.targets import TARGETS
 
 logger = Logger()
 
 _HERE = Path(__file__).resolve()
-# Owns chunks_active (migration 004); the master user and ingest_ops are members.
+# Owns chunks_active (db/migrations/001_schema.sql); the master user and ingest_ops are members.
 VIEW_OWNER = "ingest_views"
+# migrate connects as the master user, straight to the writer endpoint.
+REQUIRED = ("db.direct_host", "db.secret_arn", "db.name")
 
 
 def migrations_dir() -> Path:
-    configured = os.environ.get("MIGRATIONS_DIR")
+    configured = get_settings().db.migrations_dir
     if configured:
         return Path(configured)
     for base in (_HERE.parents[1], _HERE.parents[2]):  # Lambda zip root, or the repo checkout
@@ -53,7 +62,8 @@ def migrations_dir() -> Path:
 
 
 def ca_bundle() -> str:
-    return os.environ.get("DB_CA_BUNDLE", str(_HERE.parents[1] / "certs" / "rds-global-bundle.pem"))
+    configured = get_settings().db.ca_bundle
+    return configured or str(_HERE.parents[1] / "certs" / "rds-global-bundle.pem")
 
 
 @logger.inject_lambda_context(clear_state=True)
@@ -71,16 +81,22 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
         if not settings.allow_truncate:
             raise PermissionError("truncate is switched off here (ALLOW_TRUNCATE=false)")
 
-    settings.require("db_direct_host", "db_secret_arn", "db_name")
+    settings.require(*REQUIRED)
+    # The default registry's live table (DynamoDB, #CONFIG items only): chunks_active must serve
+    # it, also on a rebuilt database. A failed read stops migrate rather than guess.
+    registry_live = None
+    if action == "migrate":
+        settings.require("status_table")
+        registry_live = vector_registry.recorded_live(aws.status_store())
     secret = json.loads(
-        boto3.client("secretsmanager").get_secret_value(SecretId=settings.db_secret_arn)[
+        boto3.client("secretsmanager").get_secret_value(SecretId=settings.db.secret_arn)[
             "SecretString"
         ]
     )
     with psycopg.connect(
-        host=settings.db_direct_host,
-        port=settings.db_port,
-        dbname=settings.db_name,
+        host=settings.db.direct_host,
+        port=settings.db.port,
+        dbname=settings.db.name,
         user=secret["username"],
         password=secret["password"],
         sslmode="verify-full",
@@ -89,17 +105,41 @@ def handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
         application_name="ingest-migrate",
     ) as conn:
         if action == "migrate":
-            applied = migrations.apply(conn, migrations_dir())
-            logger.info("migrations applied", extra={"applied": applied})
-            # Then a table for every embedding profile that has none yet.
-            created = profile_tables.ensure(conn, settings.embedding_profiles.values())
-            if created:
-                logger.warning("profile tables created", extra={"tables": created})
-            return {"applied": applied, "profile_tables_created": created}
+            return prepare(
+                conn,
+                migrations_dir(),
+                settings.embedding.profiles.values(),
+                settings.target_table,
+                registry_live=registry_live,
+            )
         conn.execute(sql.SQL("TRUNCATE {t}").format(t=sql.Identifier(table)))
         conn.commit()
         logger.warning("table truncated", extra={"table": table})
         return {"truncated": table}
+
+
+def prepare(
+    conn: psycopg.Connection[Any],
+    directory: Path,
+    profiles: Iterable[EmbeddingProfile],
+    default_table: str,
+    *,
+    registry_live: str | None = None,
+) -> dict[str, Any]:
+    """Migrations, then a table per embedding profile, then chunks_active over the default
+    registry's live table (registry_live). Before any change has recorded one: the table the view
+    serves already, else default_table (the default profile's)."""
+    profiles = list(profiles)
+    applied = migrations.apply(conn, directory)
+    logger.info("migrations applied", extra={"applied": applied})
+    created = profile_tables.ensure(conn, profiles)
+    if created:
+        logger.warning("profile tables created", extra={"tables": created})
+    live = registry_live or active_table(conn) or default_table
+    if live not in {p.table for p in profiles}:
+        raise ValueError(f"the live table {live!r} has no embedding profile; add it back first")
+    activate(conn, live)
+    return {"applied": applied, "profile_tables_created": created, "active_table": live}
 
 
 def known_table(event: dict[str, Any]) -> str:
@@ -121,7 +161,7 @@ def status(conn: psycopg.Connection[Any]) -> dict[str, Any]:
     tables: dict[str, Any] = {}
     for table in TARGETS:
         if conn.execute("SELECT to_regclass(%s)", (table,)).fetchone()[0] is None:  # type: ignore[index]
-            tables[table] = None  # its migration hasn't run
+            tables[table] = None  # not created yet: migrate creates it
             continue
         rows, active, articles = conn.execute(  # type: ignore[misc]
             sql.SQL(
@@ -140,7 +180,7 @@ def activate(conn: psycopg.Connection[Any], table: str) -> dict[str, Any]:
 
     Runs as the view's owner (SET LOCAL ROLE, so it ends with the transaction): the caller only
     needs membership in ingest_views, and the new view keeps that owner. security_invoker keeps
-    row-level security (migration 005) the caller's: readers see their tenant only."""
+    the tables' row-level security the caller's: readers see their tenant only."""
     previous = active_table(conn)
     with conn.transaction():
         conn.execute(sql.SQL("SET LOCAL ROLE {r}").format(r=sql.Identifier(VIEW_OWNER)))
@@ -154,5 +194,6 @@ def activate(conn: psycopg.Connection[Any], table: str) -> dict[str, Any]:
         conn.execute("GRANT SELECT ON chunks_active TO ingest_reader, ingest_writer")
     # The read above opened a transaction (unless autocommit), which made the block a savepoint.
     conn.commit()
-    logger.warning("chunks_active switched", extra={"from": previous, "to": table})
+    if previous != table:
+        logger.warning("chunks_active switched", extra={"from": previous, "to": table})
     return {"previous": previous, "active_table": table}

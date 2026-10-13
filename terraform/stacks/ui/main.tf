@@ -25,29 +25,28 @@ data "aws_ssm_parameter" "upstream" {
 }
 
 locals {
-  name_prefix = "ui-${var.env}"
+  name_prefix = module.common.name_prefix
   account_id  = data.aws_caller_identity.current.account_id
   region      = data.aws_region.current.region
-  partition   = data.aws_partition.current.partition
 
   upstream = { for k, p in data.aws_ssm_parameter.upstream : k => p.value }
 
   # Browsers PUT files straight to the raw bucket with presigned URLs on its regional endpoint.
   raw_bucket_origin = "https://${local.upstream.producer_raw_bucket_name}.s3.${local.region}.amazonaws.com"
 
-  # BFF package. The local zip is hashed only in zip mode, so S3 mode never reads the disk.
-  use_s3_artifact = var.lambda_s3_key != null
-  zip_hash        = one([for p in compact([local.use_s3_artifact ? "" : var.lambda_zip_path]) : filebase64sha256(p)])
-  lambda_code = {
-    zip_path         = local.use_s3_artifact ? null : var.lambda_zip_path
-    s3_bucket        = var.lambda_s3_bucket
-    s3_key           = var.lambda_s3_key
-    source_code_hash = local.use_s3_artifact ? var.lambda_s3_source_code_hash : local.zip_hash
-  }
-
   # Every role the stack creates carries the workload boundary (terraform/bootstrap/access.tf);
   # the deploy role may only create roles that do.
-  permissions_boundary = var.workload_boundary_enabled ? coalesce(var.permissions_boundary_arn, "arn:${local.partition}:iam::${local.account_id}:policy/entingestion-${var.env}-workload-boundary") : null
+  permissions_boundary = module.common.permissions_boundary
+}
+
+# BFF package: the local zip (default) or an artifact in S3 (CI).
+module "lambda_artifact" {
+  source = "../../modules/lambda_artifact"
+
+  zip_path            = var.lambda_zip_path
+  s3_bucket           = var.lambda_s3_bucket
+  s3_key              = var.lambda_s3_key
+  s3_source_code_hash = var.lambda_s3_source_code_hash
 }
 
 # ---------------------------------------------------------------------------
@@ -113,9 +112,9 @@ locals {
 }
 
 # Plan-time warning if a role misses the boundary (the deploy role's CreateRole would fail).
-check "roles_carry_the_workload_boundary" {
-  assert {
-    condition     = alltrue([for b in local.role_permissions_boundaries : coalesce(b, "none") == coalesce(local.permissions_boundary, "none")])
-    error_message = "A role in this stack doesn't carry the workload boundary (local.permissions_boundary)."
-  }
+module "boundary_check" {
+  source = "../../modules/boundary_check"
+
+  boundaries = local.role_permissions_boundaries
+  expected   = local.permissions_boundary
 }

@@ -1,4 +1,4 @@
-# Registrar: S3 ObjectCreated (raw/) -> SQS (+DLQ) -> registrar Lambda (brief §6.2, §7.3).
+# Registrar: S3 ObjectCreated (raw/) -> SQS (+DLQ) -> registrar Lambda.
 
 locals {
   registrar_timeout = 300
@@ -113,7 +113,7 @@ module "registrar_function" {
   handler              = "producer.registrar.lambda_handler"
   memory_size          = 1024
   timeout              = local.registrar_timeout
-  code                 = local.lambda_code
+  code                 = module.lambda_artifact.code
   environment          = local.function_environment
   policy_json          = data.aws_iam_policy_document.registrar.json
   kms_key_arn          = module.kms.key_arn

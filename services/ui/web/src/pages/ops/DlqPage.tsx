@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import { api } from "../../api";
 import { ConfirmAction } from "../../components/ConfirmAction";
 import { ErrorBanner, Loading } from "../../components/common";
-import { useOverview } from "../../components/useOverview";
+import { useOverview } from "../../hooks/useOverview";
 import { buildRedriveRequest, DEFAULT_REDRIVE, MAX_REDRIVE, QUEUES, queueDepth } from "../../ops";
 import type { ActionResponse } from "../../types";
 

@@ -1,6 +1,11 @@
 variable "region" {
-  description = "Region for the state bucket."
+  description = "Region for the state bucket, the trail bucket and the provider: TF_VAR_region (export it from AWS_REGION; no tracked file names it). The stacks' Makefile finds the state bucket with STATE_REGION, which must match."
   type        = string
+
+  validation {
+    condition     = can(regex("^[a-z]{2}(-[a-z]+)+-[0-9]$", var.region))
+    error_message = "region must be an AWS region name (<area>-<location>-<number>), from TF_VAR_region."
+  }
 }
 
 variable "aws_account_id" {

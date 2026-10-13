@@ -22,9 +22,9 @@ def handler(ctx: StepContext) -> StepOutput:
         raise make_error(ErrorCode.UNREADABLE, f"unrecognised file type for {key}")
     title, blocks, pages, extractor = extract(kind, data)
     chars = sum(len(b.text) for b in blocks)
-    textless = chars < ctx.settings.ocr_min_chars_per_page * max(pages or 1, 1)
-    if kind is Kind.PDF and textless and ctx.settings.ocr_enabled:
-        # Scanned (no text layer): OCR finishes this step (brief §4.4).
+    textless = chars < ctx.settings.ocr.min_chars_per_page * max(pages or 1, 1)
+    if kind is Kind.PDF and textless and ctx.settings.ocr.enabled:
+        # Scanned (no text layer): OCR finishes this step (ingest.steps.ocr).
         return StepOutput(
             metrics={"pages": pages or 0, "chars": chars, "route": "OCR"},
             result={"route": "OCR"},

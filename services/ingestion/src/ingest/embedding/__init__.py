@@ -1,1 +1,2 @@
-"""Embeddings: Bedrock Titan v2 with a DynamoDB cache (brief §4.4 step 6)."""
+"""Embeddings: the configured embedding profiles' models (Bedrock or OpenAI-compatible), with a
+DynamoDB cache."""

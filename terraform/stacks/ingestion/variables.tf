@@ -80,8 +80,14 @@ variable "tags" {
 # -- Producer hand-off (read-only) ---------------------------------------------
 
 variable "producer_ssm_prefix" {
-  description = "SSM prefix where the producer publishes its outputs, e.g. /entingestion/dev/producer."
+  description = "SSM prefix where the producer publishes its outputs. null (the default) = <ssm_prefix>/<env>/producer, where the producer stack of this environment publishes them."
   type        = string
+  default     = null
+
+  validation {
+    condition     = var.producer_ssm_prefix == null || can(regex("^/.*[^/]$", var.producer_ssm_prefix))
+    error_message = "producer_ssm_prefix must start with / and must not end with /."
+  }
 }
 
 variable "ssm_prefix" {
@@ -127,6 +133,7 @@ variable "embedding_profiles" {
     models"). The migrate function creates a new profile's table; reindex fills it; a switch
     makes it live for the default registry or one tenant. Never change a profile's model or
     dimension once its table has data: add a new profile instead.
+    Set in envs/<env>/ingestion.tfvars; there is no default model.
       provider             "bedrock" (InvokeModel: amazon.titan-embed-text-v2*, cohere.embed-*)
                            or "openai_compatible" (POST <base_url>/embeddings: LiteLLM, vLLM, ...)
       model                Bedrock model id, or the server's model name
@@ -153,10 +160,6 @@ variable "embedding_profiles" {
     batch_size          = optional(number, 16)
     max_input_tokens    = optional(number, 8192)
   }))
-  default = {
-    primary = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 1024 }
-    compact = { provider = "bedrock", model = "amazon.titan-embed-text-v2:0", dimension = 512 }
-  }
 
   validation {
     condition     = length(var.embedding_profiles) > 0 && alltrue([for name in keys(var.embedding_profiles) : can(regex("^[a-z][a-z0-9_]{0,40}$", name))])
@@ -202,9 +205,8 @@ variable "embedding_profiles" {
 }
 
 variable "default_profile" {
-  description = "The default registry's table before it has a registry item (tenants without their own registry): chunks_<default_profile>."
+  description = "The default registry's table before it has a registry item (tenants without their own registry): chunks_<default_profile>. Set in envs/<env>/ingestion.tfvars."
   type        = string
-  default     = "primary"
 
   validation {
     condition     = contains(keys(var.embedding_profiles), var.default_profile)
@@ -255,6 +257,28 @@ variable "dispatcher_reserved_concurrency" {
   description = "Reserved concurrency for the dispatcher. null = unreserved."
   type        = number
   default     = null
+}
+
+variable "dispatcher_timeout" {
+  description = "Dispatcher Lambda timeout in seconds. The ingest and backfill queues' visibility timeout is 6 times this."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.dispatcher_timeout >= 10 && var.dispatcher_timeout <= 900
+    error_message = "dispatcher_timeout must be between 10 and 900 seconds."
+  }
+}
+
+variable "slot_wait_seconds" {
+  description = "How long one dispatcher invocation waits for a free admission slot before handing the rest of its batch back to the queue (SLOT_WAIT_SECONDS). Below dispatcher_timeout, so the wait never outlives the function."
+  type        = number
+  default     = 40
+
+  validation {
+    condition     = var.slot_wait_seconds >= 0 && var.slot_wait_seconds < var.dispatcher_timeout
+    error_message = "slot_wait_seconds must be at least 0 and less than dispatcher_timeout."
+  }
 }
 
 variable "dispatcher_max_concurrency" {
@@ -376,7 +400,7 @@ variable "interface_endpoint_az_count" {
 
 variable "database_mode" {
   description = <<-EOT
-    aurora: Aurora PostgreSQL Serverless v2 behind RDS Proxy (the brief's design; prod).
+    aurora: Aurora PostgreSQL Serverless v2 behind RDS Proxy (the production design).
     rds:    one RDS for PostgreSQL instance, Lambdas connect directly. For the AWS free plan,
             which only allows "express" Aurora (no VPC, not in Terraform) and no RDS Proxy.
   EOT
@@ -455,13 +479,17 @@ variable "backup_enabled" {
 }
 
 variable "backup_copy_region" {
-  description = "Region the backups are copied to (disaster recovery); must differ from region."
+  description = "Region the backups are copied to (disaster recovery); must differ from region. Set in envs/<env>/ingestion.tfvars: null where backup_enabled is false."
   type        = string
-  default     = "us-east-2"
 
   validation {
-    condition     = var.backup_copy_region != var.region
+    condition     = var.backup_copy_region == null || var.backup_copy_region != var.region
     error_message = "backup_copy_region must be another region than region."
+  }
+
+  validation {
+    condition     = !var.backup_enabled || var.backup_copy_region != null
+    error_message = "backup_enabled needs a backup_copy_region to copy the backups to."
   }
 }
 
@@ -472,9 +500,9 @@ variable "backup_retention_days" {
 }
 
 variable "allow_truncate" {
-  description = "Let the migrate function empty a vector table ({\"action\": \"truncate\"}, the rebuild test). Off in prod."
+  description = "Let the migrate function empty a vector table ({\"action\": \"truncate\"}, the rebuild test). Off unless an environment's tfvars turns it on (dev does)."
   type        = bool
-  default     = true
+  default     = false
 }
 
 # -- Operations (Phase 2) ------------------------------------------------------------
@@ -643,9 +671,13 @@ variable "rerank_enabled" {
 }
 
 variable "rerank_model_id" {
-  description = "Bedrock reranking model (bedrock-agent-runtime Rerank)."
+  description = "Bedrock reranking model (bedrock-agent-runtime Rerank), used when rerank_enabled. Set in envs/<env>/ingestion.tfvars."
   type        = string
-  default     = "amazon.rerank-v1:0"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+\\.[A-Za-z0-9._:-]+$", var.rerank_model_id))
+    error_message = "rerank_model_id must be a Bedrock model id (<provider>.<model>)."
+  }
 }
 
 variable "eval_tolerance" {

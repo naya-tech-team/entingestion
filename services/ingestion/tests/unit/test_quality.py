@@ -73,9 +73,18 @@ def test_chunk_level_recall_ndcg_and_mrr() -> None:
     ideal = 1 + 1 / math.log2(3) + 1 / math.log2(4)
     assert j.ndcg_at_10 == pytest.approx((1 / math.log2(3) + 1 / math.log2(5)) / ideal)
     assert j.article_recall_at_10 == 1.0
+    with pytest.raises(ValueError, match="no relevant chunk_ids"):
+        judge(hits, set(), "C")
 
-    legacy = judge(hits, set(), "C")  # article-only label
-    assert (legacy.labelled, legacy.recall_at_10, legacy.mrr) == (False, 1.0, 1 / 3)
+
+def test_a_golden_set_needs_its_pointer_and_chunk_labels() -> None:
+    from ingest.evaluation import GOLDEN_POINTER, load_golden
+
+    with pytest.raises(FileNotFoundError):
+        load_golden(lambda key: None)
+    files = {GOLDEN_POINTER: b"_eval/golden/a.jsonl", "_eval/golden/a.jsonl": b'{"id": "1"}'}
+    with pytest.raises(ValueError, match="no chunk_ids"):
+        load_golden(files.get)
 
 
 def test_bootstrap_interval_brackets_the_mean() -> None:
@@ -151,13 +160,15 @@ def test_a_baseline_run_also_scores_the_live_table(
     from ingest import evaluation
 
     s3 = boto3.client("s3", region_name=REGION)
-    s3.put_object(Bucket=STAGING_BUCKET, Key=evaluation.LEGACY_GOLDEN,
-                  Body=json.dumps({"question": "q", "article_id": "art_1"}).encode())  # fmt: skip
+    key = "_eval/golden/20261011-0000.jsonl"
+    line = {"id": "1", "question": "q", "article_id": "art_1", "doc_version": 1, "chunk_ids": ["c"]}
+    s3.put_object(Bucket=STAGING_BUCKET, Key=key, Body=json.dumps(line).encode())
+    s3.put_object(Bucket=STAGING_BUCKET, Key=evaluation.GOLDEN_POINTER, Body=key.encode())
     fake = FakeLambda(
         {
             "describe": {"active_table": "chunks_primary", "dimension": 1024},
             "search": lambda e: {
-                "results": [[{"chunk_id": "c", "article_id": "art_1" if e["table"] else "art_2",
+                "results": [[{"chunk_id": "c" if e["table"] else "d", "article_id": "art_1",
                               "score": 0.5}]]
             },
         }
@@ -170,7 +181,7 @@ def test_a_baseline_run_also_scores_the_live_table(
         {"table": "chunks_compact", "baseline": True}, FakeContext()
     )
 
-    assert out["recall_at_10"] == 1.0  # the legacy, article-level set
+    assert out["recall_at_10"] == 1.0
     assert out["baseline"]["table"] == "chunks_primary"
     assert out["baseline"]["recall_at_10"] == 0.0
     assert out["delta"]["recall_at_10"] == 1.0
@@ -181,7 +192,7 @@ def test_a_baseline_run_also_scores_the_live_table(
 
 def backfill_queued() -> list[dict[str, Any]]:
     sqs = boto3.client("sqs", region_name=REGION)
-    url = aws.get_settings().backfill_queue_url
+    url = aws.get_settings().queues.backfill_url
     out: list[dict[str, Any]] = []
     while messages := sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10).get("Messages"):
         out += [json.loads(m["Body"]) for m in messages]
