@@ -14,6 +14,7 @@ entingestion turns uploaded documents into searchable, versioned chunks in Postg
 |---|---|
 | Deploy it into an account and see a document indexed | [GETTING_STARTED.md](GETTING_STARTED.md) |
 | Understand the components, data model and design decisions | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| Look up an `ingestion_status` item, attribute, index or query | [STATUS_TABLE.md](STATUS_TABLE.md) |
 | Follow what happens step by step for an upload, a run, a failure, a reindex | [WORKFLOWS.md](WORKFLOWS.md) |
 | See each acceptance scenario, how to run it and what to expect | [USE_CASES.md](USE_CASES.md) |
 | Call the APIs (routes, bodies, responses, errors) | [API.md](API.md) and the [Bruno collection](../bruno/README.md) |

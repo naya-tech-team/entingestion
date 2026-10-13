@@ -161,6 +161,8 @@ GSIs (sparse):
 | `gsi3-lease` | lease expiry | Reconciler: expired leases |
 | `gsi4-stepfail` | failed steps | Failures by error code |
 
+Every attribute, index key and access pattern: [STATUS_TABLE.md](STATUS_TABLE.md).
+
 ### Staging (S3) and the vector store (PostgreSQL + pgvector)
 
 ![Staging and vectors](diagrams/png/06-staging-vectors.png)
